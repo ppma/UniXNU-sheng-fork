@@ -76,3 +76,5 @@ UNIXNU_UNIQUE_CHIP_ID=<8 hex digits> scripts/package.sh --os 27 --uefi ../uefi-s
 See the [packaging script](https://unixnu.com/porting/packaging) page for the
 fixed steps, the board.toml keys and the verification the run performs.
 
+
+<!-- wb build trigger 2026-11-18 -->
