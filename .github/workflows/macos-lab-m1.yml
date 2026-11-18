@@ -146,6 +146,27 @@ jobs:
             UniXNU/out/sheng/macos-27.3-26C5035r/sheng_macos/tree/.cache/xnu-work
             UniXNU/out/sheng/macos-27.3-26C5035r/sheng_macos/tree/.cache/fakeroot
             UniXNU/out/sheng/macos-27.3-26C5035r/sheng_macos/tree/build/xnu
+      - name: Pre-seed locked wifi sources
+        # freebsd-src releng 分支 tip 会前进，导致 fetch-sources.py 深克隆校验失败；
+        # 这里按锁文件精确预置锁定 commit 的仓库，绕开分支漂移
+        run: |
+          python3 - <<'PYTHON'
+          import json, subprocess
+          from pathlib import Path
+          root = Path('drivers/Ath12kWifi')
+          lock = json.loads((root / 'tools/source-lock.json').read_text())
+          source = lock['freebsd']
+          directory = root / 'deps' / 'freebsd'
+          if directory.exists():
+              print('freebsd deps already present, skip')
+          else:
+              directory.parent.mkdir(parents=True, exist_ok=True)
+              subprocess.run(['git', 'init', str(directory)], check=True)
+              subprocess.run(['git', '-C', str(directory), 'remote', 'add', 'origin', source['url']], check=True)
+              subprocess.run(['git', '-C', str(directory), 'fetch', '--depth', '1', 'origin', source['commit']], check=True)
+              subprocess.run(['git', '-C', str(directory), 'checkout', source['commit']], check=True)
+              print('freebsd seeded at', source['commit'][:12])
+          PYTHON
       - name: Prepare installation
         working-directory: UniXNU
         run: |
