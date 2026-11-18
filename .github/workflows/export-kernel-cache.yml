@@ -26,6 +26,7 @@ jobs:
       - uses: actions/cache/restore@v4
         with:
           key: ${{ inputs.cache_key }}
+          restore-keys: sheng-macos27-kernel-v1-
           fail-on-cache-miss: true
           path: |
             UniXNU/out/sheng/macos-27.3-26C5035r/sheng_macos/tree/.cache/xnu-work
