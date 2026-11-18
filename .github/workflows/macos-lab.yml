@@ -161,8 +161,9 @@ jobs:
               print('freebsd deps already present, skip')
           else:
               directory.parent.mkdir(parents=True, exist_ok=True)
-              subprocess.run(['git', 'init', str(directory)], check=True)
-              subprocess.run(['git', '-C', str(directory), 'remote', 'add', 'origin', source['url']], check=True)
+              # 与 fetch-sources.py 的克隆方式一致（sparse+partial），但把 HEAD 固定到锁定 commit
+              subprocess.run(['git', 'clone', '--depth', '1', '--branch', source['ref'],
+                              '--filter=blob:none', '--sparse', source['url'], str(directory)], check=True)
               subprocess.run(['git', '-C', str(directory), 'fetch', '--depth', '1', 'origin', source['commit']], check=True)
               subprocess.run(['git', '-C', str(directory), 'checkout', source['commit']], check=True)
               print('freebsd seeded at', source['commit'][:12])
