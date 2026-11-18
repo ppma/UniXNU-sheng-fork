@@ -1,0 +1,69 @@
+name: Publish image to Release (split parts)
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Source run id containing sheng-macos-27 artifact
+        type: string
+        required: true
+        default: '44220867849'
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" 2>/dev/null || true
+          sudo apt-get clean 2>/dev/null || true
+          df -h /
+      - name: Download artifact (GitHub internal network)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ inputs.run_id }}
+        run: |
+          set -euxo pipefail
+          URL=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/artifacts" \
+            --jq '.artifacts[] | select(.name=="sheng-macos-27") | .archive_download_url')
+          test -n "$URL"
+          curl -fL --retry 5 --retry-delay 5 -H "Authorization: Bearer $GH_TOKEN" "$URL" -o sheng-macos-27.zip
+          ls -lh sheng-macos-27.zip
+          unzip -t sheng-macos-27.zip > /dev/null
+      - name: Split into <2GB parts and upload to Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euxo pipefail
+          # 分成 1800MB 的分卷（Release 单文件上限 2GB）
+          mkdir parts
+          split -b 1800m -d -a 2 sheng-macos-27.zip parts/sheng-macos-27.part
+          ls -lh parts/
+          # 立一个 manifest 记录原始大小与分卷数
+          (echo "sheng-macos-27.zip"; stat -c %s sheng-macos-27.zip; ls parts/) > manifest.txt
+          # 复用已建的 release（450340793），tag = sheng-macos-27
+          UPLOAD_URL=$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/sheng-macos-27" \
+            | python3 -c "import json,sys; print(json.load(sys.stdin)['upload_url'].split('{')[0])")
+          echo "upload url: $UPLOAD_URL"
+          curl -fL -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Content-Type: text/plain" \
+            --data-binary @manifest.txt "$UPLOAD_URL?name=manifest.txt"
+          for f in parts/*; do
+            name=$(basename "$f")
+            echo "uploading $name ..."
+            curl -fL --retry 3 -X POST -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary @"$f" "$UPLOAD_URL?name=$name"
+            echo "done $name"
+          done
+          echo "=== RELEASE PAGE ==="
+          echo "https://github.com/$GITHUB_REPOSITORY/releases/tag/sheng-macos-27"
+          echo "=== DOWNLOAD URLS ==="
+          curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/sheng-macos-27" \
+            | python3 -c "import json,sys; [print(a['browser_download_url']) for a in json.load(sys.stdin)['assets']]"
