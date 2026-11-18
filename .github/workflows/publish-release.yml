@@ -23,26 +23,40 @@ jobs:
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" 2>/dev/null || true
           sudo apt-get clean 2>/dev/null || true
           df -h /
-      - name: Download artifact and publish as Release
+      - name: Download artifact (GitHub internal network)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RUN_ID: ${{ inputs.run_id }}
         run: |
           set -euxo pipefail
-          # 取 artifact 的下载 URL（GitHub 内部 API）
           URL=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/artifacts" \
             --jq '.artifacts[] | select(.name=="sheng-macos-27") | .archive_download_url')
           test -n "$URL"
-          echo "Downloading artifact inside GitHub network..."
           curl -fL --retry 5 --retry-delay 5 -H "Authorization: Bearer $GH_TOKEN" "$URL" -o sheng-macos-27.zip
           ls -lh sheng-macos-27.zip
-          # 校验是有效 zip
           unzip -t sheng-macos-27.zip > /dev/null
-          # 创建/更新 Release 并上传（GitHub 内部，秒级）
-          if ! gh release view sheng-macos-27 >/dev/null 2>&1; then
-            gh release create sheng-macos-27 --title "sheng macOS 27.3 (26C5035r)" \
-              --notes "Built by UniXNU macos-lab.yml. chipid 5a023ebb. Use thunder/xunlei or any download accelerator."
+          echo "artifact downloaded and verified"
+      - name: Create release via API (no git needed)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euxo pipefail
+          # 用 REST API 创建 Release（不依赖 git 仓库）
+          CODE=$(curl -s -o /tmp/rel.json -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases" \
+            -d '{"tag_name":"sheng-macos-27","name":"sheng macOS 27.3 (26C5035r)","body":"Built by UniXNU macos-lab.yml. chipid 5a023ebb. Use xunlei/any accelerator."}')
+          cat /tmp/rel.json
+          if [ "$CODE" != "201" ]; then
+            echo "create release returned $CODE; trying existing"
+            curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/sheng-macos-27" -o /tmp/rel.json
           fi
-          gh release upload sheng-macos-27 sheng-macos-27.zip --clobber
+          UPLOAD_URL=$(python3 -c "import json; print(json.load(open('/tmp/rel.json'))['upload_url'].split('{')[0])")
+          echo "upload url: $UPLOAD_URL"
+          curl -fL -X POST -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Content-Type: application/zip" \
+            --data-binary @sheng-macos-27.zip \
+            "$UPLOAD_URL?name=sheng-macos-27.zip"
           echo "=== PUBLIC DOWNLOAD URL ==="
           echo "https://github.com/$GITHUB_REPOSITORY/releases/download/sheng-macos-27/sheng-macos-27.zip"
