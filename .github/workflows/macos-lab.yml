@@ -252,6 +252,21 @@ jobs:
             UniXNU/out/sheng/macos-27.3-26C5035r/sheng_macos/runtime/data.dbr
             device/drivers/Ath12kWifi/deps
             device/.cache/firmware
+      - name: Upload kernel build inputs
+        if: always() && steps.build-images.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-build-inputs
+          retention-days: 7
+          compression-level: 0
+          path: |
+            UniXNU/out/sheng/macos-27.3-26C5035r/sheng_macos/xnu-inputs.json
+            UniXNU/out/sheng/macos-27.3-26C5035r/sheng_macos/tree/.cache/xnu-work
+            UniXNU/out/sheng/macos-27.3-26C5035r/sheng_macos/tree/.cache/fakeroot
+            UniXNU/out/sheng/macos-27.3-26C5035r/sheng_macos/tree/build/xnu
+            UniXNU/out/feeds
+            device/drivers/Ath12kWifi/deps
+            device/.cache/firmware
       - name: Save kernel compile records
         if: always() && steps.build-images.outcome == 'success' && steps.kernel-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
