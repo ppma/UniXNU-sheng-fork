@@ -153,7 +153,20 @@ jobs:
             fi
             echo "::endgroup::"
           done
+          # Homebrew llvm/llvm@22 are keg-only (bin not linked into the prefix bin).
+          # build-adreno-metal-bridge.py hardcodes /opt/homebrew/opt/llvm/bin/llvm-as
+          # (arm64 only) and otherwise falls back to shutil.which('llvm-as').
+          # On the Intel runner expose the real llvm-as (LLVM 22) via GITHUB_PATH.
+          llvm_as="$(brew --prefix)/opt/llvm@22/bin/llvm-as"
+          if [ ! -x "$llvm_as" ]; then
+            llvm_as="$(brew --prefix)/opt/llvm/bin/llvm-as"
+          fi
+          if [ ! -x "$llvm_as" ]; then
+            echo "::error::llvm-as (LLVM >= 21) not found under $(brew --prefix)/opt"; exit 1
+          fi
+          echo "llvm-as: $llvm_as -> $("$llvm_as" --version | head -1)"
           {
+            echo "$(dirname "$llvm_as")"
             echo "$HOME/.cargo/bin"
             echo "$(brew --prefix)/opt/bison/bin"
           } >> "$GITHUB_PATH"
