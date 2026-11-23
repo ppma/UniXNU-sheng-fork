@@ -35,7 +35,7 @@ jobs:
       cache_key: ${{ inputs.kernel_cache_key }}
   images:
     if: ${{ !inputs.export_build_inputs }}
-    runs-on: macos-26-intel
+    runs-on: macos-26
     timeout-minutes: 360
     env:
       UNIXNU_IPSW_JOBS: 16
@@ -44,10 +44,19 @@ jobs:
       UNIXNU_UNIQUE_CHIP_ID: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID }}
       UNIXNU_LAB_PASSWORD: ${{ secrets.UNIXNU_LAB_PASSWORD }}
     steps:
+      - name: Verify runner architecture
+        run: |
+          set -eu
+          echo "arch=$(uname -m) | brew=$(brew --prefix) | macOS=$(sw_vers -productVersion)"
+          test "$(uname -m)" = "arm64" || { echo "::error::expected arm64 runner (macos-26), got $(uname -m)"; exit 1; }
       - name: Select full Xcode toolchain
         run: |
           set -eu
-          cand=$(ls -d /Applications/Xcode*.app/Contents/Developer 2>/dev/null | sort | tail -1)
+          if [ -d /Applications/Xcode_26.6.app/Contents/Developer ]; then
+            cand=/Applications/Xcode_26.6.app/Contents/Developer
+          else
+            cand=$(ls -d /Applications/Xcode*.app/Contents/Developer 2>/dev/null | sort | tail -1)
+          fi
           if [ -z "$cand" ]; then
             echo "::error::No full Xcode.app found on this runner; available /Applications:"
             ls /Applications
