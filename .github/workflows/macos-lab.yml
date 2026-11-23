@@ -239,6 +239,52 @@ jobs:
           else
             python3 ../device/scripts/prepare-macos-install.py --reuse-policies
           fi
+      - name: Purge foreign-arch XNU host tools
+        # The kernel compile cache was produced on the arm64 runner (macos-26,
+        # run 44220867849). Its key has no CPU arch, so an Intel runner restores
+        # arm64 SETUP host tools (replacecontents ...) and build-xnu-4k-baseline.sh
+        # fails with "Bad CPU type in executable". Kernel objects themselves are
+        # arm64 (correct, keep them); only host-run tools must be x86_64.
+        run: |
+          set -euxo pipefail
+          echo "host arch: $(uname -m)"
+          python3 - <<'PY'
+          import stat, struct
+          from pathlib import Path
+          root = Path('UniXNU/out/sheng/macos-27.3-26C5035r/sheng_macos/tree')
+          scan = [root / 'build' / 'xnu', root / '.cache' / 'xnu-work']
+          ARM64, ARM = 0x0100000c, 0x0000000c
+          removed = []
+          for base in scan:
+              if not base.exists():
+                  continue
+              for p in base.rglob('*'):
+                  try:
+                      if not p.is_file() or p.is_symlink():
+                          continue
+                      # flag stamps produced by replacecontents; force regeneration
+                      if p.name in ('.CFLAGS', '.CXXFLAGS'):
+                          p.unlink(); removed.append(str(p) + ' [stamp]'); continue
+                      if not (p.stat().st_mode & stat.S_IXUSR):
+                          continue
+                      with p.open('rb') as f:
+                          head = f.read(8)
+                      if len(head) < 8:
+                          continue
+                      magic = head[:4]
+                      # single-arch thin Mach-O (LE); fat binaries already carry
+                      # an x86_64 slice and are safe, so leave them alone
+                      if magic not in (b'\xcf\xfa\xed\xfe', b'\xce\xfa\xed\xfe'):
+                          continue
+                      cpu = struct.unpack('<I', head[4:8])[0]
+                      if cpu in (ARM64, ARM):
+                          p.unlink(); removed.append(str(p))
+                  except OSError:
+                      pass
+          print('purged %d foreign-arch host files' % len(removed))
+          for r in removed[:40]:
+              print('  rm', r)
+          PY
       - name: Build images
         id: build-images
         working-directory: device
