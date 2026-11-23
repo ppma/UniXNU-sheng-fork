@@ -35,7 +35,7 @@ jobs:
       cache_key: ${{ inputs.kernel_cache_key }}
   images:
     if: ${{ !inputs.export_build_inputs }}
-    runs-on: macos-26
+    runs-on: macos-26-intel
     timeout-minutes: 360
     env:
       UNIXNU_IPSW_JOBS: 16
@@ -44,11 +44,11 @@ jobs:
       UNIXNU_UNIQUE_CHIP_ID: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID }}
       UNIXNU_LAB_PASSWORD: ${{ secrets.UNIXNU_LAB_PASSWORD }}
     steps:
-      - name: Verify runner architecture
+      - name: Log runner environment
         run: |
           set -eu
           echo "arch=$(uname -m) | brew=$(brew --prefix) | macOS=$(sw_vers -productVersion)"
-          test "$(uname -m)" = "arm64" || { echo "::error::expected arm64 runner (macos-26), got $(uname -m)"; exit 1; }
+          echo "Homebrew API mode will be forced in Install build tools"
       - name: Select full Xcode toolchain
         run: |
           set -eu
@@ -137,7 +137,13 @@ jobs:
         timeout-minutes: 45
         run: |
           export HOMEBREW_NO_INSTALL_CLEANUP=1 HOMEBREW_NO_ANALYTICS=1
-          brew update
+          # Intel runner images set HOMEBREW_NO_INSTALL_FROM_API=1, which makes brew
+          # fetch individual .rb files from raw.githubusercontent.com and hang.
+          # Unset it so brew uses the formulae.brew.sh API (one JSON download).
+          unset HOMEBREW_NO_INSTALL_FROM_API
+          export HOMEBREW_API_DOMAIN=https://formulae.brew.sh
+          echo "HOMEBREW_NO_INSTALL_FROM_API='${HOMEBREW_NO_INSTALL_FROM_API:-<unset>}' brew=$(brew --prefix)"
+          # Intentionally NO brew update: keep the image's complete local taps intact.
           for p in dtc llvm lld llvm@22 lld@22 cmake mtools ninja glslang shaderc spirv-tools bison pkgconf rustup unifdef openssl@3 zstd ipsw; do
             echo "::group::brew install $p"
             if brew list --versions "$p" >/dev/null 2>&1; then
