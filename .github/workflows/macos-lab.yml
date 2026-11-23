@@ -125,9 +125,19 @@ jobs:
           stamp.write_text(signature + '\n')
           PYTHON
       - name: Install build tools
+        timeout-minutes: 45
         run: |
+          export HOMEBREW_NO_INSTALL_CLEANUP=1 HOMEBREW_NO_ANALYTICS=1
           brew update
-          brew install dtc llvm lld llvm@22 lld@22 cmake mtools ninja glslang shaderc spirv-tools bison pkgconf rustup unifdef openssl@3 zstd ipsw
+          for p in dtc llvm lld llvm@22 lld@22 cmake mtools ninja glslang shaderc spirv-tools bison pkgconf rustup unifdef openssl@3 zstd ipsw; do
+            echo "::group::brew install $p"
+            if brew list --versions "$p" >/dev/null 2>&1; then
+              echo "already installed: $p"
+            else
+              brew install "$p" || { echo "::error::brew install $p failed"; exit 1; }
+            fi
+            echo "::endgroup::"
+          done
           {
             echo "$HOME/.cargo/bin"
             echo "$(brew --prefix)/opt/bison/bin"
