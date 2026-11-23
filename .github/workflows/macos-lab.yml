@@ -24,7 +24,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: macos-lab-${{ github.ref }}-${{ inputs.export_build_inputs && 'inputs' || 'images' }}
+  group: macos-lab-${{ github.run_id }}
   cancel-in-progress: false
 
 jobs:
