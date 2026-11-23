@@ -38,14 +38,25 @@ jobs:
     runs-on: macos-26-intel
     timeout-minutes: 360
     env:
-      # 动态选 Xcode：优先官方 pin 的 26.6，否则用 runner 默认（xcode-select -p）
-      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
       UNIXNU_IPSW_JOBS: 16
       HOMEBREW_NO_AUTO_UPDATE: 1
       GITHUB_TOKEN: ${{ github.token }}
       UNIXNU_UNIQUE_CHIP_ID: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID }}
       UNIXNU_LAB_PASSWORD: ${{ secrets.UNIXNU_LAB_PASSWORD }}
     steps:
+      - name: Select full Xcode toolchain
+        run: |
+          set -eu
+          cand=$(ls -d /Applications/Xcode*.app/Contents/Developer 2>/dev/null | sort | tail -1)
+          if [ -z "$cand" ]; then
+            echo "::error::No full Xcode.app found on this runner; available /Applications:"
+            ls /Applications
+            exit 1
+          fi
+          echo "DEVELOPER_DIR=$cand" >> "$GITHUB_ENV"
+          echo "Selected DEVELOPER_DIR=$cand"
+          DEVELOPER_DIR="$cand" xcodebuild -version
+          DEVELOPER_DIR="$cand" xcrun --sdk iphoneos --show-sdk-version
       - name: Check out device sources
         uses: actions/checkout@v4
         with:
@@ -226,6 +237,7 @@ jobs:
           mkdir artifacts
           target=UniXNU/out/sheng/macos-27.3-26C5035r/sheng_macos
           cp "$target/boot/boot.img" "$target/payload/payload.img" "$target/kernel/kernel.macho" "$target/package.manifest.json" artifacts/
+          if [ -f "$target/boot/vendor_boot.img" ]; then cp "$target/boot/vendor_boot.img" artifacts/; fi
           cp "$target/runtime/data.dbr" artifacts/
           cp "$target/tree/build/prime-list.txt" "$target/tree/build/prime-list.json" artifacts/
           if [ "$BUILD_ROOT_STORAGE" = true ]; then
@@ -238,6 +250,22 @@ jobs:
           path: artifacts/
           compression-level: 0
           retention-days: 1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sheng-boot-only
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 3
+          path: |
+            artifacts/boot.img
+            artifacts/vendor_boot.img
+            artifacts/payload.img
+            artifacts/kernel.macho
+            artifacts/data.dbr
+            artifacts/package.manifest.json
+            artifacts/prime-list.txt
+            artifacts/prime-list.json
+            artifacts/userdata-root.json
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
