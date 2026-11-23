@@ -206,7 +206,6 @@ jobs:
             UniXNU/out/sheng/macos-27.3-26C5035r/sheng_macos/xnu-inputs.json
             UniXNU/out/sheng/macos-27.3-26C5035r/sheng_macos/tree/.cache/xnu-work
             UniXNU/out/sheng/macos-27.3-26C5035r/sheng_macos/tree/.cache/fakeroot
-            UniXNU/out/sheng/macos-27.3-26C5035r/sheng_macos/tree/build/xnu
       - name: Pre-seed locked wifi sources
         # freebsd-src releng 分支 tip 会前进，导致 fetch-sources.py 深克隆校验失败；
         # 这里按锁文件精确预置锁定 commit 的仓库，绕开分支漂移
@@ -239,52 +238,33 @@ jobs:
           else
             python3 ../device/scripts/prepare-macos-install.py --reuse-policies
           fi
-      - name: Purge foreign-arch XNU host tools
-        # The kernel compile cache was produced on the arm64 runner (macos-26,
-        # run 44220867849). Its key has no CPU arch, so an Intel runner restores
-        # arm64 SETUP host tools (replacecontents ...) and build-xnu-4k-baseline.sh
-        # fails with "Bad CPU type in executable". Kernel objects themselves are
-        # arm64 (correct, keep them); only host-run tools must be x86_64.
+      - name: Reset XNU build tree for host-native tools
+        # Kernel compile cache was produced on the arm64 runner (macos-26, run
+        # 44220867849) and its key has no CPU arch. On Intel it injects arm64
+        # SETUP host tools AND their arm64 .o inputs. v7 deleted only executable
+        # files, so make relinked x86_64 host tools from leftover arm64 .o and
+        # failed with "found architecture 'arm64', required architecture 'x86_64'".
+        # v8 drops the whole object tree: make rebuilds SETUP tools natively as
+        # x86_64 and the kernel objects as arm64 from the cached source worktree.
         run: |
           set -euxo pipefail
           echo "host arch: $(uname -m)"
-          python3 - <<'PY'
-          import stat, struct
-          from pathlib import Path
-          root = Path('UniXNU/out/sheng/macos-27.3-26C5035r/sheng_macos/tree')
-          scan = [root / 'build' / 'xnu', root / '.cache' / 'xnu-work']
-          ARM64, ARM = 0x0100000c, 0x0000000c
-          removed = []
-          for base in scan:
-              if not base.exists():
-                  continue
-              for p in base.rglob('*'):
-                  try:
-                      if not p.is_file() or p.is_symlink():
-                          continue
-                      # flag stamps produced by replacecontents; force regeneration
-                      if p.name in ('.CFLAGS', '.CXXFLAGS'):
-                          p.unlink(); removed.append(str(p) + ' [stamp]'); continue
-                      if not (p.stat().st_mode & stat.S_IXUSR):
-                          continue
-                      with p.open('rb') as f:
-                          head = f.read(8)
-                      if len(head) < 8:
-                          continue
-                      magic = head[:4]
-                      # single-arch thin Mach-O (LE); fat binaries already carry
-                      # an x86_64 slice and are safe, so leave them alone
-                      if magic not in (b'\xcf\xfa\xed\xfe', b'\xce\xfa\xed\xfe'):
-                          continue
-                      cpu = struct.unpack('<I', head[4:8])[0]
-                      if cpu in (ARM64, ARM):
-                          p.unlink(); removed.append(str(p))
-                  except OSError:
-                      pass
-          print('purged %d foreign-arch host files' % len(removed))
-          for r in removed[:40]:
-              print('  rm', r)
-          PY
+          xnu=UniXNU/out/sheng/macos-27.3-26C5035r/sheng_macos/tree/build/xnu
+          if [ -d "$xnu" ]; then
+            echo "removing restored XNU object tree"
+            du -sh "$xnu" || true
+            rm -rf "$xnu"
+          else
+            echo "no restored XNU object tree (clean build)"
+          fi
+          test ! -d "$xnu" && echo "XNU object tree reset OK"
+          # no stale object files may survive in the source worktree either
+          work=UniXNU/out/sheng/macos-27.3-26C5035r/sheng_macos/tree/.cache/xnu-work
+          if [ -d "$work" ]; then
+            n=$(find "$work" -type f \( -name '*.o' -o -name '*.cpo' -o -name '.CFLAGS' -o -name '.CXXFLAGS' \) | wc -l)
+            echo "stale object/stamp files in xnu-work: $n"
+            find "$work" -type f \( -name '*.o' -o -name '*.cpo' -o -name '.CFLAGS' -o -name '.CXXFLAGS' \) -delete
+          fi
       - name: Build images
         id: build-images
         working-directory: device
