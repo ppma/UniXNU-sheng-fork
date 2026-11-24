@@ -1,0 +1,115 @@
+name: patch-vendor-boot-datareset
+
+on:
+  workflow_dispatch:
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Install tools and fetch scripts
+        run: |
+          set -euxo pipefail
+          pip install edk2-basetools
+          TC=$(python3 -c "
+import edk2basetools, glob, os
+root = os.path.dirname(edk2basetools.__file__)
+hits = glob.glob(root + '/**/TianoCompress', recursive=True) + glob.glob(root + '/**/TianoCompress.*', recursive=True)
+print(hits[0] if hits else '')
+")
+          if [ -z "$TC" ]; then
+            echo '::error::TianoCompress not found in edk2-basetools wheel'
+            exit 1
+          fi
+          sudo ln -sf "$TC" /usr/local/bin/TianoCompress
+          TianoCompress --version || true
+          REF=8542980d02b4d2cc5c32ee3542de1760b2562aac
+          mkdir -p unixnu
+          curl -sL "https://raw.githubusercontent.com/UniXNU/UniXNU/$REF/scripts/unixnu/ramdisk.py" -o ramdisk.py
+          curl -sL "https://raw.githubusercontent.com/UniXNU/UniXNU/$REF/scripts/unixnu/vendor_boot.py" -o unixnu/vendor_boot.py
+          curl -sL "https://raw.githubusercontent.com/UniXNU/UniXNU/$REF/scripts/unixnu/util.py" -o unixnu/util.py
+          touch unixnu/__init__.py
+
+      - name: Download v9 vendor_boot from release
+        run: |
+          set -euxo pipefail
+          curl -sL --retry 5 --retry-all-errors \
+            -o stock-vendor_boot.img \
+            "https://github.com/ppma/UniXNU-sheng-fork/releases/download/gki-v9-build/vendor_boot.img"
+          ls -la stock-vendor_boot.img
+
+      - name: Decode, patch toml, re-encode, rebuild vendor_boot
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          import sys
+          sys.path.insert(0, '.')
+          import ramdisk
+          from unixnu import vendor_boot
+
+          # 1) decode UNXNFAT -> 256 MiB FAT volume
+          ramdisk.decode('stock-vendor_boot.img', 'fat.img')
+          fat = bytearray(open('fat.img','rb').read())
+          print('FAT volume:', len(fat))
+
+          # 2) locate unixnu.toml kernel_args and swap ethernet=1 -> data-reset=1 (same length)
+          old = b'"ethernet=1"'
+          new = b'"data-reset=1"'
+          assert len(old) == len(new), 'length mismatch'
+          idx = fat.find(old)
+          print('ethernet=1 first occurrence at', idx)
+          if idx < 0:
+              print('::error::ethernet=1 not found in FAT volume')
+              sys.exit(1)
+          count = 0
+          pos = 0
+          while True:
+              p = fat.find(old, pos)
+              if p < 0:
+                  break
+              fat[p:p+len(old)] = new
+              count += 1
+              pos = p + len(old)
+          print('replaced occurrences:', count)
+          open('fat.img','wb').write(fat)
+
+          # 3) re-encode UNXNFAT
+          ramdisk.encode('fat.img', 'new-ramdisk.bin')
+
+          # 4) rebuild vendor_boot from stock template
+          vendor_boot.build('stock-vendor_boot.img', 'new-ramdisk.bin', 'vendor_boot-patched.img', 0x1000000)
+          import os
+          print('patched vendor_boot size:', os.path.getsize('vendor_boot-patched.img'))
+          assert os.path.getsize('vendor_boot-patched.img') <= 0x6000000, 'exceeds 96 MiB partition'
+          PY
+          ls -la vendor_boot-patched.img new-ramdisk.bin
+
+      - name: Verify patched image headers
+        run: |
+          python3 - <<'PY'
+          import struct
+          v = open('vendor_boot-patched.img','rb').read()
+          assert v[:8] == b'VNDRBOOT', v[:8]
+          hver, page = struct.unpack_from('<II', v, 8)
+          vrs = struct.unpack_from('<I', v, 24)[0]
+          raddr = struct.unpack_from('<I', v, 20)[0]
+          print('header_version=%d page=%d vendor_ramdisk_size=%d ramdisk_addr=0x%x' % (hver, page, vrs, raddr))
+          assert hver == 4 and page == 4096 and vrs > 0 and raddr == 0x1000000
+          assert len(v) <= 0x6000000
+          print('VERIFY OK')
+          PY
+
+      - name: Publish patched vendor_boot to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euxo pipefail
+          gh release view gki-v9-datareset --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            && gh release delete gki-v9-datareset --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" || true
+          gh release create gki-v9-datareset vendor_boot-patched.img \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "vendor_boot with data-reset=1 (patched v9)" \
+            --notes "v9 vendor_boot.img with the default boot kernel arg ethernet=1 replaced by data-reset=1 (same length, FAT untouched otherwise). Flash only vendor_boot_a: fastboot flash vendor_boot_a vendor_boot-patched.img"
+          gh release view gki-v9-datareset --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | .name + " -> " + .url'
