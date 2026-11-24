@@ -37,8 +37,24 @@ jobs:
             -o "${{ github.event.inputs.artifact }}.zip"
           ls -la
           unzip -q -o "${{ github.event.inputs.artifact }}.zip"
+          rm -f "${{ github.event.inputs.artifact }}.zip"
           echo "=== unpacked ==="
           find . -maxdepth 2 -type f -printf '%s  %p\n' | sort -nr
+
+      - name: Repack single flash bundle zip
+        # The release carries one combined zip (boot.img + vendor_boot.img),
+        # matching the original artifact concept: one package to download,
+        # two partitions to flash (boot_a + vendor_boot_a).
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          import zipfile
+          with zipfile.ZipFile('sheng-boot-only.zip', 'w', zipfile.ZIP_STORED) as z:
+              for f in ('boot.img', 'vendor_boot.img'):
+                  z.write(f)
+                  print('packed', f, z.getinfo(f).file_size)
+          PY
+          ls -la sheng-boot-only.zip
 
       - name: Create release and upload assets
         env:
@@ -46,7 +62,7 @@ jobs:
         run: |
           set -euxo pipefail
           tag="${{ github.event.inputs.tag }}"
-          files=$(find . -maxdepth 1 -type f ! -name '*.zip')
+          files=$(find . -maxdepth 1 -type f)
           if [ -z "$files" ]; then
             echo "::error::no files found to publish"
             exit 1
