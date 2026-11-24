@@ -1,82 +1,115 @@
-name: publish-artifact-to-release
+name: patch-vendor-boot-datareset
 
 on:
   workflow_dispatch:
-    inputs:
-      run_id:
-        description: 'Build run id that produced the artifact'
-        required: true
-      artifact_id:
-        description: 'Artifact database id (from API artifacts list)'
-        required: true
-      artifact:
-        description: 'Artifact name'
-        required: true
-        default: 'sheng-boot-only'
-      tag:
-        description: 'Release tag to create'
-        required: true
-        default: 'gki-v9-build'
 
 jobs:
-  publish:
+  patch:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      actions: read
     steps:
-      - name: Download artifact via API (GitHub-internal transfer)
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Install tools and fetch scripts
+        run: |
+          set -euxo pipefail
+          pip install edk2-basetools
+          TC=$(python3 -c "
+import edk2basetools, glob, os
+root = os.path.dirname(edk2basetools.__file__)
+hits = glob.glob(root + '/**/TianoCompress', recursive=True) + glob.glob(root + '/**/TianoCompress.*', recursive=True)
+print(hits[0] if hits else '')
+")
+          if [ -z "$TC" ]; then
+            echo '::error::TianoCompress not found in edk2-basetools wheel'
+            exit 1
+          fi
+          sudo ln -sf "$TC" /usr/local/bin/TianoCompress
+          TianoCompress --version || true
+          REF=8542980d02b4d2cc5c32ee3542de1760b2562aac
+          mkdir -p unixnu
+          curl -sL "https://raw.githubusercontent.com/UniXNU/UniXNU/$REF/scripts/unixnu/ramdisk.py" -o ramdisk.py
+          curl -sL "https://raw.githubusercontent.com/UniXNU/UniXNU/$REF/scripts/unixnu/vendor_boot.py" -o unixnu/vendor_boot.py
+          curl -sL "https://raw.githubusercontent.com/UniXNU/UniXNU/$REF/scripts/unixnu/util.py" -o unixnu/util.py
+          touch unixnu/__init__.py
+
+      - name: Download v9 vendor_boot from release
         run: |
           set -euxo pipefail
           curl -sL --retry 5 --retry-all-errors \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/artifacts/${{ github.event.inputs.artifact_id }}/zip" \
-            -o "${{ github.event.inputs.artifact }}.zip"
-          ls -la
-          unzip -q -o "${{ github.event.inputs.artifact }}.zip"
-          rm -f "${{ github.event.inputs.artifact }}.zip"
-          echo "=== unpacked ==="
-          find . -maxdepth 2 -type f -printf '%s  %p\n' | sort -nr
+            -o stock-vendor_boot.img \
+            "https://github.com/ppma/UniXNU-sheng-fork/releases/download/gki-v9-build/vendor_boot.img"
+          ls -la stock-vendor_boot.img
 
-      - name: Repack single flash bundle zip
-        # The release carries one combined zip (boot.img + vendor_boot.img),
-        # matching the original artifact concept: one package to download,
-        # two partitions to flash (boot_a + vendor_boot_a).
+      - name: Decode, patch toml, re-encode, rebuild vendor_boot
         run: |
           set -euxo pipefail
           python3 - <<'PY'
-          import zipfile
-          with zipfile.ZipFile('sheng-boot-only.zip', 'w', zipfile.ZIP_STORED) as z:
-              for f in ('boot.img', 'vendor_boot.img'):
-                  z.write(f)
-                  print('packed', f, z.getinfo(f).file_size)
-          PY
-          ls -la sheng-boot-only.zip
+          import sys
+          sys.path.insert(0, '.')
+          import ramdisk
+          from unixnu import vendor_boot
 
-      - name: Create release and upload assets
+          # 1) decode UNXNFAT -> 256 MiB FAT volume
+          ramdisk.decode('stock-vendor_boot.img', 'fat.img')
+          fat = bytearray(open('fat.img','rb').read())
+          print('FAT volume:', len(fat))
+
+          # 2) locate unixnu.toml kernel_args and swap ethernet=1 -> data-reset=1 (same length)
+          old = b'"ethernet=1"'
+          new = b'"data-reset=1"'
+          assert len(old) == len(new), 'length mismatch'
+          idx = fat.find(old)
+          print('ethernet=1 first occurrence at', idx)
+          if idx < 0:
+              print('::error::ethernet=1 not found in FAT volume')
+              sys.exit(1)
+          count = 0
+          pos = 0
+          while True:
+              p = fat.find(old, pos)
+              if p < 0:
+                  break
+              fat[p:p+len(old)] = new
+              count += 1
+              pos = p + len(old)
+          print('replaced occurrences:', count)
+          open('fat.img','wb').write(fat)
+
+          # 3) re-encode UNXNFAT
+          ramdisk.encode('fat.img', 'new-ramdisk.bin')
+
+          # 4) rebuild vendor_boot from stock template
+          vendor_boot.build('stock-vendor_boot.img', 'new-ramdisk.bin', 'vendor_boot-patched.img', 0x1000000)
+          import os
+          print('patched vendor_boot size:', os.path.getsize('vendor_boot-patched.img'))
+          assert os.path.getsize('vendor_boot-patched.img') <= 0x6000000, 'exceeds 96 MiB partition'
+          PY
+          ls -la vendor_boot-patched.img new-ramdisk.bin
+
+      - name: Verify patched image headers
+        run: |
+          python3 - <<'PY'
+          import struct
+          v = open('vendor_boot-patched.img','rb').read()
+          assert v[:8] == b'VNDRBOOT', v[:8]
+          hver, page = struct.unpack_from('<II', v, 8)
+          vrs = struct.unpack_from('<I', v, 24)[0]
+          raddr = struct.unpack_from('<I', v, 20)[0]
+          print('header_version=%d page=%d vendor_ramdisk_size=%d ramdisk_addr=0x%x' % (hver, page, vrs, raddr))
+          assert hver == 4 and page == 4096 and vrs > 0 and raddr == 0x1000000
+          assert len(v) <= 0x6000000
+          print('VERIFY OK')
+          PY
+
+      - name: Publish patched vendor_boot to release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euxo pipefail
-          tag="${{ github.event.inputs.tag }}"
-          files=$(find . -maxdepth 1 -type f)
-          if [ -z "$files" ]; then
-            echo "::error::no files found to publish"
-            exit 1
-          fi
-          echo "uploading files: $files"
-          gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
-            && gh release delete "$tag" --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" || true
-          gh release create "$tag" $files \
+          gh release view gki-v9-datareset --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            && gh release delete gki-v9-datareset --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" || true
+          gh release create gki-v9-datareset vendor_boot-patched.img \
             --repo "$GITHUB_REPOSITORY" \
-            --title "${{ github.event.inputs.artifact }} (run ${{ github.event.inputs.run_id }})" \
-            --notes "Auto-published from actions run ${{ github.event.inputs.run_id }}, artifact '${{ github.event.inputs.artifact }}' (GKI v9 build: vendor_boot / 12GB memory-map / board v4 patches). Flash: fastboot flash boot_a boot.img && fastboot flash vendor_boot_a vendor_boot.img. Do NOT touch userdata."
-
-      - name: Report asset URLs
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release view "${{ github.event.inputs.tag }}" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | .name + " -> " + .url'
+            --title "vendor_boot with data-reset=1 (patched v9)" \
+            --notes "v9 vendor_boot.img with the default boot kernel arg ethernet=1 replaced by data-reset=1 (same length, FAT untouched otherwise). Flash only vendor_boot_a: fastboot flash vendor_boot_a vendor_boot-patched.img"
+          gh release view gki-v9-datareset --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | .name + " -> " + .url'
