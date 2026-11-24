@@ -108,6 +108,8 @@ jobs:
           restore-keys: sheng-macos27-build-v1-${{ runner.os }}-
           path: |
             UniXNU/out/feeds
+            !UniXNU/out/feeds/*/BaseTools/Source/C/bin
+            !UniXNU/out/feeds/*/BaseTools/Source/C/bin/*
             UniXNU/out/sheng/macos-27.3-26C5035r/sheng_macos/tree/.cache/gpu-reference
             UniXNU/out/sheng/macos-27.3-26C5035r/sheng_macos/tree/.cache/mesa-work
             UniXNU/out/sheng/macos-27.3-26C5035r/sheng_macos/tree/build/adreno-metal-bridge
@@ -265,6 +267,79 @@ jobs:
             echo "stale object/stamp files in xnu-work: $n"
             find "$work" -type f \( -name '*.o' -o -name '*.cpo' -o -name '.CFLAGS' -o -name '.CXXFLAGS' \) -delete
           fi
+      - name: Rebuild EDK2 host tools natively
+        # v8 compiled kernel.macho + prelink successfully, then package/build.sh
+        # died: "BaseTools/Source/C/bin/GenFw: Bad CPU type in executable".
+        # build-inputs cache (key has no CPU arch) restored arm64 EDK2 C tools
+        # from run 44220867849. v9 excludes that bin dir from the cache, rebuilds
+        # the C tools for the host arch, and fails fast if any arm64-only tool
+        # remains (instead of finding out 50 min later at the package step).
+        run: |
+          set -euxo pipefail
+          echo "host arch: $(uname -m)"
+          python3 - <<'PY'
+          import os, struct, subprocess, sys
+          from pathlib import Path
+          ARM64_32, ARM64, X86_64 = 0x0000000c, 0x0100000c, 0x01000007
+          def cpu(p):
+              try:
+                  with Path(p).open('rb') as f:
+                      h = f.read(8)
+              except OSError:
+                  return None
+              if len(h) < 8:
+                  return None
+              if h[:4] in (b'\xcf\xfa\xed\xfe', b'\xce\xfa\xed\xfe'):
+                  return struct.unpack('<I', h[4:8])[0]
+              return None
+          roots = sorted(Path('UniXNU/out/feeds').glob('*/BaseTools'))
+          print('BaseTools roots:', [str(r) for r in roots])
+          if not roots:
+              print('::error::no EDK2 BaseTools tree found')
+              sys.exit(1)
+          jobs = str(os.cpu_count() or 4)
+          for r in roots:
+              bindir = r / 'Source' / 'C' / 'bin'
+              genfw = bindir / 'GenFw'
+              c = cpu(genfw) if genfw.exists() else None
+              print('%s GenFw cpu=%s' % (genfw, hex(c) if c else 'missing/fat/script'))
+              if genfw.exists() and c == X86_64:
+                  print('  already native x86_64, skip rebuild')
+                  continue
+              print('  rebuilding native EDK2 C tools')
+              if genfw.exists():
+                  genfw.unlink()
+              cmds = [['make', '-C', str(r / 'Source' / 'C'), '-j', jobs],
+                      ['make', '-C', str(r), '-j', jobs]]
+              ok = False
+              for cmd in cmds:
+                  print('  try: ' + ' '.join(cmd))
+                  rc = subprocess.call(cmd)
+                  if rc == 0 and genfw.exists():
+                      ok = True
+                      break
+                  print('  rc=%d' % rc)
+              if not ok:
+                  print('::error::failed to rebuild ' + str(genfw))
+                  sys.exit(1)
+          bad = []
+          for r in roots:
+              bindir = r / 'Source' / 'C' / 'bin'
+              if not bindir.is_dir():
+                  continue
+              for p in bindir.iterdir():
+                  if not p.is_file() or p.is_symlink():
+                      continue
+                  if cpu(p) in (ARM64, ARM64_32):
+                      bad.append(str(p))
+          print('arm64-only host tools remaining: %d' % len(bad))
+          for x in bad[:20]:
+              print('  ' + x)
+          if bad:
+              print('::error::arm64-only EDK2 host tools would fail at package stage')
+              sys.exit(1)
+          print('EDK2 host tools native OK')
+          PY
       - name: Build images
         id: build-images
         working-directory: device
@@ -348,6 +423,8 @@ jobs:
           key: sheng-macos27-build-v1-${{ runner.os }}-${{ github.run_id }}
           path: |
             UniXNU/out/feeds
+            !UniXNU/out/feeds/*/BaseTools/Source/C/bin
+            !UniXNU/out/feeds/*/BaseTools/Source/C/bin/*
             UniXNU/out/sheng/macos-27.3-26C5035r/sheng_macos/tree/.cache/gpu-reference
             UniXNU/out/sheng/macos-27.3-26C5035r/sheng_macos/tree/.cache/mesa-work
             UniXNU/out/sheng/macos-27.3-26C5035r/sheng_macos/tree/build/adreno-metal-bridge
