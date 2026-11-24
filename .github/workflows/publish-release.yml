@@ -62,15 +62,18 @@ jobs:
               return r
 
           run(['mdir', '-i', 'fat.img', '::/'], required=False)
-          import re
-          du = run(['mdu', '-i', 'fat.img', '::'], required=False)
-          tomls = re.findall(r'(::/[^\s]*unixnu\.toml)', du.stdout)
-          print('toml paths:', tomls)
-          toml_path = tomls[0] if tomls else None
+          run(['mdir', '-i', 'fat.img', '::/EFI/UniXNU'], required=False)
+          toml_path = None
+          for cand in ['::/EFI/UniXNU/unixnu.toml', '::/EFI/UniXNU/Payloads/unixnu.toml',
+                       '::/EFI/UNIXNU/unixnu.toml', '::/EFI/unixnu.toml', '::/unixnu.toml']:
+              rr = subprocess.run(['mtype', '-i', 'fat.img', cand], capture_output=True)
+              if rr.returncode == 0:
+                  toml_path = cand
+                  print('found toml at', cand)
+                  break
           if not toml_path:
               print('::error::unixnu.toml not located')
               sys.exit(1)
-          print('using toml path:', toml_path)
           run(['mcopy', '-i', 'fat.img', toml_path, 'u.toml'])
           text = open('u.toml', 'rb').read()
           print('toml bytes:', len(text))
