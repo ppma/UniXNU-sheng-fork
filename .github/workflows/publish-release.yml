@@ -1,62 +1,60 @@
-name: Publish image to Release
+name: publish-artifact-to-release
 
 on:
   workflow_dispatch:
     inputs:
       run_id:
-        description: Source run id containing sheng-macos-27 artifact
-        type: string
+        description: 'Build run id that produced the artifact'
         required: true
-        default: '44220867849'
-
-permissions:
-  contents: write
-  actions: read
+      artifact:
+        description: 'Artifact name to publish'
+        required: true
+        default: 'sheng-boot-only'
+      tag:
+        description: 'Release tag to create'
+        required: true
+        default: 'gki-v9-build'
 
 jobs:
   publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    permissions:
+      contents: write
     steps:
-      - name: Free disk space
+      - name: Download artifact from build run (GitHub-internal, no local hop)
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ github.event.inputs.artifact }}
+          run-id: ${{ github.event.inputs.run_id }}
+
+      - name: List unpacked files
         run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" 2>/dev/null || true
-          sudo apt-get clean 2>/dev/null || true
-          df -h /
-      - name: Download artifact (GitHub internal network)
+          echo "=== unpacked files ==="
+          find . -maxdepth 2 -type f -printf '%s  %p\n' | sort -nr
+          echo "=== sizes ==="
+          du -sh . 2>/dev/null || true
+
+      - name: Create release and upload assets
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RUN_ID: ${{ inputs.run_id }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euxo pipefail
-          URL=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/artifacts" \
-            --jq '.artifacts[] | select(.name=="sheng-macos-27") | .archive_download_url')
-          test -n "$URL"
-          curl -fL --retry 5 --retry-delay 5 -H "Authorization: Bearer $GH_TOKEN" "$URL" -o sheng-macos-27.zip
-          ls -lh sheng-macos-27.zip
-          unzip -t sheng-macos-27.zip > /dev/null
-          echo "artifact downloaded and verified"
-      - name: Create release via API (no git needed)
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euxo pipefail
-          # 用 REST API 创建 Release（不依赖 git 仓库）
-          CODE=$(curl -s -o /tmp/rel.json -w "%{http_code}" -X POST \
-            -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases" \
-            -d '{"tag_name":"sheng-macos-27","name":"sheng macOS 27.3 (26C5035r)","body":"Built by UniXNU macos-lab.yml. chipid 5a023ebb. Use xunlei/any accelerator."}')
-          cat /tmp/rel.json
-          if [ "$CODE" != "201" ]; then
-            echo "create release returned $CODE; trying existing"
-            curl -sf -H "Authorization: Bearer $GH_TOKEN" \
-              "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/sheng-macos-27" -o /tmp/rel.json
+          tag="${{ github.event.inputs.tag }}"
+          files=$(find . -maxdepth 1 -type f)
+          if [ -z "$files" ]; then
+            echo "::error::no files found to publish"
+            exit 1
           fi
-          UPLOAD_URL=$(python3 -c "import json; print(json.load(open('/tmp/rel.json'))['upload_url'].split('{')[0])")
-          echo "upload url: $UPLOAD_URL"
-          curl -fL -X POST -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Content-Type: application/zip" \
-            --data-binary @sheng-macos-27.zip \
-            "$UPLOAD_URL?name=sheng-macos-27.zip"
-          echo "=== PUBLIC DOWNLOAD URL ==="
-          echo "https://github.com/$GITHUB_REPOSITORY/releases/download/sheng-macos-27/sheng-macos-27.zip"
+          echo "uploading files: $files"
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            && gh release delete "$tag" --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" || true
+          gh release create "$tag" $files \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "${{ github.event.inputs.artifact }} (run ${{ github.event.inputs.run_id }})" \
+            --notes "Auto-published from actions run ${{ github.event.inputs.run_id }}, artifact '${{ github.event.inputs.artifact }}' (GKI v9 build: vendor_boot / 12GB memory-map / board v4 patches). Flash: fastboot flash boot_a boot.img && fastboot flash vendor_boot_a vendor_boot.img. Do NOT touch userdata."
+
+      - name: Report asset URLs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "${{ github.event.inputs.tag }}" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | .name + " -> " + .url'
