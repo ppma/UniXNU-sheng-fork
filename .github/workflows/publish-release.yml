@@ -9,13 +9,15 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Install tools and fetch scripts
+      - name: Build TianoCompress and fetch scripts
         run: |
           set -euxo pipefail
-          pip install edk2-basetools
-          TC=$(python3 -c 'import edk2basetools,glob,os;root=os.path.dirname(edk2basetools.__file__);hits=glob.glob(root+"/**/TianoCompress",recursive=True);print(hits[0] if hits else "")')
-          if [ -z "$TC" ]; then echo "::error::TianoCompress not found"; exit 1; fi
-          sudo ln -sf "$TC" /usr/local/bin/TianoCompress
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/microsoft/mu_basecore.git mubt
+          git -C mubt sparse-checkout set BaseTools/Source/C BaseTools/Source/Python
+          make -C mubt/BaseTools/Source/C TianoCompress 2>/dev/null || make -C mubt/BaseTools/Source/C || true
+          TC=$(find mubt -name TianoCompress -type f | head -1)
+          if [ -z "$TC" ]; then echo "::error::TianoCompress build failed"; exit 1; fi
+          sudo ln -sf "$(pwd)/$TC" /usr/local/bin/TianoCompress
           TianoCompress --version || true
           REF=8542980d02b4d2cc5c32ee3542de1760b2562aac
           mkdir -p unixnu
