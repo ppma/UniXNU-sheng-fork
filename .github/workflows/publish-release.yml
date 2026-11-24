@@ -12,6 +12,7 @@ jobs:
       - name: Build TianoCompress and fetch scripts
         run: |
           set -euxo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y -qq mtools
           git clone --depth 1 --filter=blob:none --sparse https://github.com/microsoft/mu_basecore.git mubt
           git -C mubt sparse-checkout set BaseTools/Source/C BaseTools/Source/Python MdePkg/Include
           make -C mubt/BaseTools/Source/C TianoCompress 2>/dev/null || make -C mubt/BaseTools/Source/C || true
@@ -35,32 +36,39 @@ jobs:
       - name: Write patch scripts
         run: |
           cat > patch_vb.py <<'PYEOF'
-          import os, sys
+          import os, sys, subprocess
           sys.path.insert(0, '.')
           import ramdisk
           from unixnu import vendor_boot
 
-          ramdisk.decode('stock-vendor_boot.img', 'fat.img')
-          fat = bytearray(open('fat.img', 'rb').read())
-          print('FAT volume:', len(fat))
-          old = b'"ethernet=1"'
-          new = b'"data-reset=1"'
-          assert len(old) == len(new)
-          pos, count = 0, 0
-          while True:
-              p = fat.find(old, pos)
-              if p < 0:
-                  break
-              fat[p:p + len(old)] = new
-              count += 1
-              pos = p + len(old)
+          stock = open('stock-vendor_boot.img', 'rb').read()
+          parts = vendor_boot.parse(stock)
+          open('ramdisk.bin', 'wb').write(parts['ramdisk'])
+          print('vendor ramdisk bytes:', len(parts['ramdisk']))
+
+          ramdisk.decode('ramdisk.bin', 'fat.img')
+          print('FAT bytes:', os.path.getsize('fat.img'))
+          assert os.path.getsize('fat.img') == 256 * 1024 * 1024
+
+          subprocess.run(['mdir', '-i', 'fat.img', '::/VEFI/UNIXNU/'], check=True)
+          subprocess.run(['mcopy', '-i', 'fat.img', '::/VEFI/UNIXNU/unixnu.toml', 'u.toml'], check=True)
+          text = open('u.toml', 'rb').read()
+          print('toml bytes:', len(text))
+          print(text.decode('utf-8', 'replace')[:800])
+          if b'ethernet=1' not in text:
+              print('::error::ethernet=1 not found in unixnu.toml')
+              sys.exit(1)
+          count = text.count(b'ethernet=1')
+          text = text.replace(b'ethernet=1', b'data-reset=1')
+          open('u.toml', 'wb').write(text)
           print('replaced occurrences:', count)
-          assert count >= 1, 'ethernet=1 not found'
-          open('fat.img', 'wb').write(fat)
+          subprocess.run(['mcopy', '-i', 'fat.img', '-o', 'u.toml', '::/VEFI/UNIXNU/unixnu.toml'], check=True)
+
           ramdisk.encode('fat.img', 'new-ramdisk.bin')
           vendor_boot.build('stock-vendor_boot.img', 'new-ramdisk.bin', 'vendor_boot-patched.img', 0x1000000)
           print('patched size:', os.path.getsize('vendor_boot-patched.img'))
           assert os.path.getsize('vendor_boot-patched.img') <= 0x6000000
+          print('PATCH DONE')
           PYEOF
           cat > verify_vb.py <<'PYEOF'
           import struct
