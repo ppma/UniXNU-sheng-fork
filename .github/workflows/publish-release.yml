@@ -13,7 +13,7 @@ jobs:
         run: |
           set -euxo pipefail
           git clone --depth 1 --filter=blob:none --sparse https://github.com/microsoft/mu_basecore.git mubt
-          git -C mubt sparse-checkout set BaseTools/Source/C BaseTools/Source/Python
+          git -C mubt sparse-checkout set BaseTools/Source/C BaseTools/Source/Python MdePkg/Include
           make -C mubt/BaseTools/Source/C TianoCompress 2>/dev/null || make -C mubt/BaseTools/Source/C || true
           TC=$(find mubt -name TianoCompress -type f | head -1)
           if [ -z "$TC" ]; then echo "::error::TianoCompress build failed"; exit 1; fi
