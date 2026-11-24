@@ -6,8 +6,11 @@ on:
       run_id:
         description: 'Build run id that produced the artifact'
         required: true
+      artifact_id:
+        description: 'Artifact database id (from API artifacts list)'
+        required: true
       artifact:
-        description: 'Artifact name to publish'
+        description: 'Artifact name'
         required: true
         default: 'sheng-boot-only'
       tag:
@@ -22,18 +25,20 @@ jobs:
       contents: write
       actions: read
     steps:
-      - name: Download artifact from build run (GitHub-internal, no local hop)
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ github.event.inputs.artifact }}
-          run-id: ${{ github.event.inputs.run_id }}
-
-      - name: List unpacked files
+      - name: Download artifact via API (GitHub-internal transfer)
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          echo "=== unpacked files ==="
+          set -euxo pipefail
+          curl -sL --retry 5 --retry-all-errors \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/artifacts/${{ github.event.inputs.artifact_id }}/zip" \
+            -o "${{ github.event.inputs.artifact }}.zip"
+          ls -la
+          unzip -q -o "${{ github.event.inputs.artifact }}.zip"
+          echo "=== unpacked ==="
           find . -maxdepth 2 -type f -printf '%s  %p\n' | sort -nr
-          echo "=== sizes ==="
-          du -sh . 2>/dev/null || true
 
       - name: Create release and upload assets
         env:
@@ -41,7 +46,7 @@ jobs:
         run: |
           set -euxo pipefail
           tag="${{ github.event.inputs.tag }}"
-          files=$(find . -maxdepth 1 -type f)
+          files=$(find . -maxdepth 1 -type f ! -name '*.zip')
           if [ -z "$files" ]; then
             echo "::error::no files found to publish"
             exit 1
