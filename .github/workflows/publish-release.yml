@@ -82,20 +82,20 @@ jobs:
               print('::error::ethernet=1 not found in unixnu.toml')
               sys.exit(1)
           count = text.count(b'ethernet=1')
-          text = text.replace(b'ethernet=1', b'data-reset=1')
+          text = text.replace(b'ethernet=1', b'data-reset=2')
           open('u.toml', 'wb').write(text)
           print('replaced occurrences:', count)
           subprocess.run(['mcopy', '-i', 'fat.img', '-o', 'u.toml', toml_path], check=True)
 
           ramdisk.encode('fat.img', 'new-ramdisk.bin')
-          vendor_boot.build('stock-vendor_boot.img', 'new-ramdisk.bin', 'vendor_boot-patched.img', 0x1000000)
-          print('patched size:', os.path.getsize('vendor_boot-patched.img'))
-          assert os.path.getsize('vendor_boot-patched.img') <= 0x6000000
+          vendor_boot.build('stock-vendor_boot.img', 'new-ramdisk.bin', 'vendor_boot-hello.img', 0x1000000)
+          print('patched size:', os.path.getsize('vendor_boot-hello.img'))
+          assert os.path.getsize('vendor_boot-hello.img') <= 0x6000000
           print('PATCH DONE')
           PYEOF
           cat > verify_vb.py <<'PYEOF'
           import struct
-          v = open('vendor_boot-patched.img', 'rb').read()
+          v = open('vendor_boot-hello.img', 'rb').read()
           assert v[:8] == b'VNDRBOOT'
           hver, page = struct.unpack_from('<II', v, 8)
           raddr = struct.unpack_from('<I', v, 20)[0]
@@ -110,7 +110,7 @@ jobs:
         run: |
           set -euxo pipefail
           python3 patch_vb.py
-          ls -la vendor_boot-patched.img new-ramdisk.bin
+          ls -la vendor_boot-hello.img new-ramdisk.bin
 
       - name: Verify patched image headers
         run: |
@@ -121,6 +121,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euxo pipefail
-          gh release view gki-v9-datareset --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 && gh release delete gki-v9-datareset --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" || true
-          gh release create gki-v9-datareset vendor_boot-patched.img --repo "$GITHUB_REPOSITORY" --title "vendor_boot with data-reset=1 (patched v9)" --notes "v9 vendor_boot.img with default-boot kernel arg ethernet=1 replaced by data-reset=1 (same length). Flash: fastboot flash vendor_boot_a vendor_boot-patched.img"
-          gh release view gki-v9-datareset --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | .name + " -> " + .url'
+          gh release view gki-v9-hello --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 && gh release delete gki-v9-hello --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" || true
+          gh release create gki-v9-hello vendor_boot-hello.img --repo "$GITHUB_REPOSITORY" --title "vendor_boot with data-reset=2 (show Hello setup assistant) (patched v9)" --notes "v9 vendor_boot.img with default-boot kernel arg ethernet=1 replaced by data-reset=2 (show Hello setup assistant) (same length). Flash: fastboot flash vendor_boot_a vendor_boot-hello.img"
+          gh release view gki-v9-hello --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | .name + " -> " + .url'
