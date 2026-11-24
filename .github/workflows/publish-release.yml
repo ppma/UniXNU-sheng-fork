@@ -50,8 +50,33 @@ jobs:
           print('FAT bytes:', os.path.getsize('fat.img'))
           assert os.path.getsize('fat.img') == 256 * 1024 * 1024
 
-          subprocess.run(['mdir', '-i', 'fat.img', '::/VEFI/UNIXNU/'], check=True)
-          subprocess.run(['mcopy', '-i', 'fat.img', '::/VEFI/UNIXNU/unixnu.toml', 'u.toml'], check=True)
+          def run(cmd, required=True):
+              r = subprocess.run(cmd, capture_output=True, text=True)
+              print('$', ' '.join(cmd), 'rc=', r.returncode)
+              if r.stdout:
+                  print(r.stdout[:2000])
+              if r.stderr:
+                  print('ERR:', r.stderr[:300])
+              if required and r.returncode != 0:
+                  sys.exit(1)
+              return r
+
+          run(['mdir', '-i', 'fat.img', '::/'], required=False)
+          import re
+          root = run(['mdir', '-i', 'fat.img', '::/'], required=False)
+          dirs = re.findall(r'<DIR>\s+(\S+)', root.stdout)
+          print('root dirs:', dirs)
+          toml_path = None
+          for cand in ['::/unixnu.toml'] + ['::/%s/unixnu.toml' % d for d in dirs] + ['::/%s/UNIXNU/unixnu.toml' % d for d in dirs]:
+              rr = subprocess.run(['mtype', '-i', 'fat.img', cand], capture_output=True)
+              if rr.returncode == 0:
+                  toml_path = cand
+                  print('found toml at', cand)
+                  break
+          if not toml_path:
+              print('::error::unixnu.toml not located')
+              sys.exit(1)
+          run(['mcopy', '-i', 'fat.img', toml_path, 'u.toml'])
           text = open('u.toml', 'rb').read()
           print('toml bytes:', len(text))
           print(text.decode('utf-8', 'replace')[:800])
@@ -62,7 +87,7 @@ jobs:
           text = text.replace(b'ethernet=1', b'data-reset=1')
           open('u.toml', 'wb').write(text)
           print('replaced occurrences:', count)
-          subprocess.run(['mcopy', '-i', 'fat.img', '-o', 'u.toml', '::/VEFI/UNIXNU/unixnu.toml'], check=True)
+          subprocess.run(['mcopy', '-i', 'fat.img', '-o', 'u.toml', toml_path], check=True)
 
           ramdisk.encode('fat.img', 'new-ramdisk.bin')
           vendor_boot.build('stock-vendor_boot.img', 'new-ramdisk.bin', 'vendor_boot-patched.img', 0x1000000)
