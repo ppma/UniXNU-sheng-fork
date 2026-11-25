@@ -14,7 +14,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euxo pipefail
-          ART=15020134646
+          ART=15047563104
           curl -sL --retry 6 --retry-all-errors \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
@@ -22,39 +22,17 @@ jobs:
             -o sheng-boot-only.zip
           ls -la sheng-boot-only.zip
           unzip -q -o sheng-boot-only.zip
-          echo "=== unpacked ==="
-          find . -maxdepth 2 -type f -printf '%s  %p\n' | sort -nr | head -20
+          find . -maxdepth 2 -type f -printf '%s  %p\n' | sort -nr | head -15
 
-      - name: Rebuild single zip (boot.img + vendor_boot.img)
-        run: |
-          set -euxo pipefail
-          BOOT=$(find . -maxdepth 2 -type f -name 'boot.img' | head -1)
-          VB=$(find . -maxdepth 2 -type f -name 'vendor_boot.img' | head -1)
-          echo "boot: $BOOT"
-          echo "vendor_boot: $VB"
-          test -n "$BOOT" && test -n "$VB"
-          ls -la "$BOOT" "$VB"
-          python3 - <<'PY'
-          import zipfile
-          import glob
-          boot = [p for p in glob.glob('**/boot.img', recursive=True) if 'sheng-boot-only' not in p][0]
-          vb = [p for p in glob.glob('**/vendor_boot.img', recursive=True) if 'sheng-boot-only' not in p][0]
-          with zipfile.ZipFile('sheng-boot-only-v11.zip', 'w', zipfile.ZIP_DEFLATED) as z:
-              z.write(boot, 'boot.img')
-              z.write(vb, 'vendor_boot.img')
-          print('zip built')
-          PY
-          ls -la sheng-boot-only-v11.zip
-
-      - name: Publish v11 boot files to release
+      - name: Publish v12 boot.img to release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euxo pipefail
-          gh release view gki-v11 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 && gh release delete gki-v11 --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" || true
+          gh release view gki-v12 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 && gh release delete gki-v12 --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" || true
           BOOT=$(find . -maxdepth 2 -type f -name 'boot.img' ! -path './sheng-boot-only*' | head -1)
           VB=$(find . -maxdepth 2 -type f -name 'vendor_boot.img' ! -path './sheng-boot-only*' | head -1)
-          gh release create gki-v11 "$BOOT" "$VB" sheng-boot-only-v11.zip --repo "$GITHUB_REPOSITORY" \
-            --title "v11: ACM fixed (PR318) + acm_fastsim=1, no data-reset" \
-            --notes "run 45604467535. Boot + vendor_boot with AppleCredentialManager in prelink and acm_fastsim=1 boot-arg. No data-reset, no autoreset. Flash: fastboot flash boot_a boot.img && fastboot flash vendor_boot_a vendor_boot.img"
-          gh release view gki-v11 --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | .name + " (" + (.size|tostring) + ")"'
+          gh release create gki-v12 "$BOOT" "$VB" --repo "$GITHUB_REPOSITORY" \
+            --title "v12: full 12GiB memory map" \
+            --notes "run 45652736259. boot.img keeps the complete 12 GiB DRAM in the UEFI memory map (v11 clipped the top 4 GiB at 0xa00000000, macOS saw ~7 GiB). vendor_boot unchanged from v11. Flash: fastboot flash boot_a boot.img"
+          gh release view gki-v12 --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | .name + " (" + (.size|tostring) + ")"'
