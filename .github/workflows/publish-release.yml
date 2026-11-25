@@ -35,17 +35,9 @@ jobs:
               print('downloaded', name)
           PY
           ls -la boot_sheng_singleboot.img linux-xiaomi-sheng.deb
-          for u in \
-            "https://dl-cdn.alpinelinux.org/alpine/v3.21/main/aarch64/busybox-static-1.36.1-r29.apk" \
-            "https://dl-cdn.alpinelinux.org/alpine/v3.20/main/aarch64/busybox-static-1.36.1-r29.apk" \
-            "https://dl-cdn.alpinelinux.org/alpine/v3.19/main/aarch64/busybox-static-1.36.1-r29.apk" \
-            "https://dl-cdn.alpinelinux.org/alpine/v3.20/main/aarch64/busybox-static-1.36.1-r28.apk" \
-            "https://dl-cdn.alpinelinux.org/alpine/v3.19/main/aarch64/busybox-static-1.36.1-r28.apk"; do
-            echo "try $u"
-            curl -sfL --retry 2 -o bs.apk "$u" && break
-          done
-          tar -xzf bs.apk bin/busybox.static
-          mv bin/busybox.static busybox
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq busybox-static
+          cp /bin/busybox busybox
           chmod +x busybox
           ls -la busybox
 
