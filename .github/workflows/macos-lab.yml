@@ -78,6 +78,34 @@ jobs:
           ref: ${{ inputs.core_ref }}
           path: UniXNU
           submodules: recursive
+      - name: Apply PR 318 (AppleCredentialManager in prelink)
+        # Upstream open PR UniXNU/UniXNU#318: without AppleCredentialManager the
+        # macOS GUI authorization path (coreauthd/coreautha) fails ACMContextCreate
+        # with -5 and every password prompt shakes and rejects valid input.
+        # acm_fastsim=1 (board side) selects Apple's software command dispatcher.
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('UniXNU/profiles/os/macos-27.3-26C5035r/profile.toml')
+          s = p.read_text()
+          old1 = '"com.apple.driver.AppleAudioClockLibs", "com.apple.driver.AppleEffaceableStorage"'
+          new1 = '"com.apple.driver.AppleAudioClockLibs", "com.apple.driver.AppleCredentialManager", "com.apple.driver.AppleEffaceableStorage"'
+          assert old1 in s, 'roots anchor 1 missing'
+          s = s.replace(old1, new1)
+          old2 = '"!com.apple.driver.AppleOnboardSerial", "!com.apple.driver.AppleSMC"]'
+          new2 = '"!com.apple.driver.AppleOnboardSerial", "!com.apple.driver.AppleSMC", "!com.apple.driver.AppleSEPManager", "!com.apple.driver.IOSlaveProcessor"]'
+          assert old2 in s, 'roots anchor 2 missing'
+          s = s.replace(old2, new2)
+          p.write_text(s, newline='\n')
+          c = Path('UniXNU/components.toml')
+          t = c.read_text()
+          old3 = 'os_abi = ["ipados-17.7.11-21H461", "ipados-27.0.1-24A446"]'
+          new3 = 'os_abi = ["ipados-17.7.11-21H461", "ipados-27.0.1-24A446", "macos-27.3-26C5035r"]'
+          assert old3 in t, 'os_abi anchor missing'
+          c.write_text(t.replace(old3, new3), newline='\n')
+          print('PR 318 patches applied')
+          PY
       - name: Check out firmware sources
         uses: actions/checkout@v4
         with:
