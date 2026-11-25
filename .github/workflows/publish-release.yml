@@ -15,17 +15,32 @@ jobs:
       - name: Download kernel, busybox and deb
         run: |
           set -euxo pipefail
-          TAG="7.3.4%202026-11-13"
-          curl -sL --retry 3 -o boot.img "https://github.com/ianchb/sm8550-mainline/releases/download/$TAG/boot_sheng_singleboot.img"
-          ls -la boot.img
+          python3 - <<'PY'
+          import json, urllib.request
+          url = 'https://api.github.com/repos/ianchb/sm8550-mainline/releases/tags/7.3.4%202026-11-13'
+          req = urllib.request.Request(url, headers={'Accept': 'application/vnd.github+json', 'User-Agent': 'wb-lr'})
+          rel = json.loads(urllib.request.urlopen(req, timeout=120).read())
+          assets = {a['name']: a['browser_download_url'] for a in rel['assets']}
+          print('assets:', list(assets))
+          for name in ('boot_sheng_singleboot.img', 'linux-xiaomi-sheng.deb'):
+              with urllib.request.urlopen(assets[name], timeout=600) as r, open(name, 'wb') as f:
+                  f.write(r.read())
+              print('downloaded', name)
+          PY
+          ls -la boot.img linux.deb
           for u in \
-            "https://busybox.net/downloads/binaries/1.36.1-aarch64-linux-musl/busybox" \
-            "https://busybox.net/downloads/binaries/1.35.0-aarch64-linux-musl/busybox"; do
-            curl -sfL --retry 2 -o busybox "$u" && break
+            "https://dl-cdn.alpinelinux.org/alpine/v3.21/main/aarch64/busybox-static-1.36.1-r29.apk" \
+            "https://dl-cdn.alpinelinux.org/alpine/v3.20/main/aarch64/busybox-static-1.36.1-r29.apk" \
+            "https://dl-cdn.alpinelinux.org/alpine/v3.19/main/aarch64/busybox-static-1.36.1-r29.apk" \
+            "https://dl-cdn.alpinelinux.org/alpine/v3.20/main/aarch64/busybox-static-1.36.1-r28.apk" \
+            "https://dl-cdn.alpinelinux.org/alpine/v3.19/main/aarch64/busybox-static-1.36.1-r28.apk"; do
+            echo "try $u"
+            curl -sfL --retry 2 -o bs.apk "$u" && break
           done
+          tar -xzf bs.apk bin/busybox.static
+          mv bin/busybox.static busybox
           chmod +x busybox
-          curl -sL --retry 3 -o linux.deb "https://github.com/ianchb/sm8550-mainline/releases/download/$TAG/linux-xiaomi-sheng.deb"
-          ls -la linux.deb
+          ls -la busybox
 
       - name: Extract tools from deb
         run: |
