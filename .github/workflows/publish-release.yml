@@ -13,12 +13,17 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Download kernel, busybox and deb
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euxo pipefail
           python3 - <<'PY'
-          import json, urllib.request
+          import json, os, urllib.request
+          headers = {'Accept': 'application/vnd.github+json', 'User-Agent': 'wb-lr'}
+          if os.environ.get('GH_TOKEN'):
+              headers['Authorization'] = 'Bearer ' + os.environ['GH_TOKEN']
           req = urllib.request.Request('https://api.github.com/repos/ianchb/sm8550-mainline/releases?per_page=5',
-                                       headers={'Accept': 'application/vnd.github+json', 'User-Agent': 'wb-lr'})
+                                       headers=headers)
           rels = json.loads(urllib.request.urlopen(req, timeout=120).read())
           rel = next(r for r in rels if r['tag_name'].startswith('7.3.4'))
           print('using tag:', rel['tag_name'])
