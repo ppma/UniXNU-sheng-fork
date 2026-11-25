@@ -29,7 +29,7 @@ jobs:
                   f.write(r.read())
               print('downloaded', name)
           PY
-          ls -la boot.img linux.deb
+          ls -la boot_sheng_singleboot.img linux-xiaomi-sheng.deb
           for u in \
             "https://dl-cdn.alpinelinux.org/alpine/v3.21/main/aarch64/busybox-static-1.36.1-r29.apk" \
             "https://dl-cdn.alpinelinux.org/alpine/v3.20/main/aarch64/busybox-static-1.36.1-r29.apk" \
@@ -47,7 +47,7 @@ jobs:
       - name: Extract tools from deb
         run: |
           set -euxo pipefail
-          dpkg-deb -x linux.deb rootfs
+          dpkg-deb -x linux-xiaomi-sheng.deb rootfs
           find rootfs -name 'rebootbl' | head -5
           find rootfs -name 'nvmem-reboot-mode.ko' | head -5
 
@@ -55,7 +55,7 @@ jobs:
         run: |
           set -euxo pipefail
           python3 package/linux-log/build-linux-log-boot.py \
-            --boot boot.img \
+            --boot boot_sheng_singleboot.img \
             --busybox busybox \
             --rebootbl "$(find rootfs -name rebootbl -type f | head -1)" \
             --module "$(find rootfs -name nvmem-reboot-mode.ko -type f | head -1)" \
