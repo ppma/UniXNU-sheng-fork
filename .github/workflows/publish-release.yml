@@ -17,9 +17,11 @@ jobs:
           set -euxo pipefail
           python3 - <<'PY'
           import json, urllib.request
-          url = 'https://api.github.com/repos/ianchb/sm8550-mainline/releases/tags/7.3.4%202026-11-13'
-          req = urllib.request.Request(url, headers={'Accept': 'application/vnd.github+json', 'User-Agent': 'wb-lr'})
-          rel = json.loads(urllib.request.urlopen(req, timeout=120).read())
+          req = urllib.request.Request('https://api.github.com/repos/ianchb/sm8550-mainline/releases?per_page=5',
+                                       headers={'Accept': 'application/vnd.github+json', 'User-Agent': 'wb-lr'})
+          rels = json.loads(urllib.request.urlopen(req, timeout=120).read())
+          rel = next(r for r in rels if r['tag_name'].startswith('7.3.4'))
+          print('using tag:', rel['tag_name'])
           assets = {a['name']: a['browser_download_url'] for a in rel['assets']}
           print('assets:', list(assets))
           for name in ('boot_sheng_singleboot.img', 'linux-xiaomi-sheng.deb'):
