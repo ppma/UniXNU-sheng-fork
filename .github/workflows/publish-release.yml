@@ -4,65 +4,57 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-reader:
+  publish:
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Checkout device repo
-        uses: actions/checkout@v4
-
-      - name: Download kernel, busybox and deb
+      - name: Download artifact via API (GitHub-internal transfer)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euxo pipefail
+          ART=15020134646
+          curl -sL --retry 6 --retry-all-errors \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/artifacts/$ART/zip" \
+            -o sheng-boot-only.zip
+          ls -la sheng-boot-only.zip
+          unzip -q -o sheng-boot-only.zip
+          echo "=== unpacked ==="
+          find . -maxdepth 2 -type f -printf '%s  %p\n' | sort -nr | head -20
+
+      - name: Rebuild single zip (boot.img + vendor_boot.img)
+        run: |
+          set -euxo pipefail
+          BOOT=$(find . -maxdepth 2 -type f -name 'boot.img' | head -1)
+          VB=$(find . -maxdepth 2 -type f -name 'vendor_boot.img' | head -1)
+          echo "boot: $BOOT"
+          echo "vendor_boot: $VB"
+          test -n "$BOOT" && test -n "$VB"
+          ls -la "$BOOT" "$VB"
           python3 - <<'PY'
-          import json, os, urllib.request
-          headers = {'Accept': 'application/vnd.github+json', 'User-Agent': 'wb-lr'}
-          if os.environ.get('GH_TOKEN'):
-              headers['Authorization'] = 'Bearer ' + os.environ['GH_TOKEN']
-          req = urllib.request.Request('https://api.github.com/repos/ianchb/sm8550-mainline/releases?per_page=5',
-                                       headers=headers)
-          rels = json.loads(urllib.request.urlopen(req, timeout=120).read())
-          rel = next(r for r in rels if r['tag_name'].startswith('7.3.4'))
-          print('using tag:', rel['tag_name'])
-          assets = {a['name']: a['browser_download_url'] for a in rel['assets']}
-          print('assets:', list(assets))
-          for name in ('boot_sheng_singleboot.img', 'linux-xiaomi-sheng.deb'):
-              with urllib.request.urlopen(assets[name], timeout=600) as r, open(name, 'wb') as f:
-                  f.write(r.read())
-              print('downloaded', name)
+          import zipfile
+          import glob
+          boot = [p for p in glob.glob('**/boot.img', recursive=True) if 'sheng-boot-only' not in p][0]
+          vb = [p for p in glob.glob('**/vendor_boot.img', recursive=True) if 'sheng-boot-only' not in p][0]
+          with zipfile.ZipFile('sheng-boot-only-v11.zip', 'w', zipfile.ZIP_DEFLATED) as z:
+              z.write(boot, 'boot.img')
+              z.write(vb, 'vendor_boot.img')
+          print('zip built')
           PY
-          ls -la boot_sheng_singleboot.img linux-xiaomi-sheng.deb
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq busybox-static
-          cp /bin/busybox busybox
-          chmod +x busybox
-          ls -la busybox
+          ls -la sheng-boot-only-v11.zip
 
-      - name: Extract tools from deb
-        run: |
-          set -euxo pipefail
-          dpkg-deb -x linux-xiaomi-sheng.deb rootfs
-          find rootfs -name 'rebootbl' | head -5
-          find rootfs -name 'nvmem-reboot-mode.ko' | head -5
-
-      - name: Build log reader image
-        run: |
-          set -euxo pipefail
-          python3 package/linux-log/build-linux-log-boot.py \
-            --boot boot_sheng_singleboot.img \
-            --busybox busybox \
-            --rebootbl "$(find rootfs -name rebootbl -type f | head -1)" \
-            --module "$(find rootfs -name nvmem-reboot-mode.ko -type f | head -1)" \
-            --out sheng-linux-log.img
-          ls -la sheng-linux-log.img
-
-      - name: Publish to release
+      - name: Publish v11 boot files to release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euxo pipefail
-          gh release view gki-tools --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 && gh release delete gki-tools --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" || true
-          gh release create gki-tools sheng-linux-log.img --repo "$GITHUB_REPOSITORY" --title "diagnostic tools" --notes "sheng-linux-log.img: flash to boot_a, boots a tiny Linux that enumerates a USB CDC ACM serial and serves the UniXNU log window (last 32MiB of userdata). Flash back the normal boot image afterwards."
+          gh release view gki-v11 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 && gh release delete gki-v11 --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" || true
+          BOOT=$(find . -maxdepth 2 -type f -name 'boot.img' ! -path './sheng-boot-only*' | head -1)
+          VB=$(find . -maxdepth 2 -type f -name 'vendor_boot.img' ! -path './sheng-boot-only*' | head -1)
+          gh release create gki-v11 "$BOOT" "$VB" sheng-boot-only-v11.zip --repo "$GITHUB_REPOSITORY" \
+            --title "v11: ACM fixed (PR318) + acm_fastsim=1, no data-reset" \
+            --notes "run 45604467535. Boot + vendor_boot with AppleCredentialManager in prelink and acm_fastsim=1 boot-arg. No data-reset, no autoreset. Flash: fastboot flash boot_a boot.img && fastboot flash vendor_boot_a vendor_boot.img"
+          gh release view gki-v11 --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | .name + " (" + (.size|tostring) + ")"'
