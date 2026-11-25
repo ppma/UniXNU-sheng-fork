@@ -4,124 +4,51 @@ on:
   workflow_dispatch:
 
 jobs:
-  patch:
+  build-reader:
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Build TianoCompress and fetch scripts
+      - name: Checkout device repo
+        uses: actions/checkout@v4
+
+      - name: Download kernel, busybox and deb
         run: |
           set -euxo pipefail
-          sudo apt-get update -qq && sudo apt-get install -y -qq mtools
-          git clone --depth 1 --filter=blob:none --sparse https://github.com/microsoft/mu_basecore.git mubt
-          git -C mubt sparse-checkout set BaseTools/Source/C BaseTools/Source/Python MdePkg/Include
-          make -C mubt/BaseTools/Source/C TianoCompress 2>/dev/null || make -C mubt/BaseTools/Source/C || true
-          TC=$(find mubt -name TianoCompress -type f | head -1)
-          if [ -z "$TC" ]; then echo "::error::TianoCompress build failed"; exit 1; fi
-          sudo ln -sf "$(pwd)/$TC" /usr/local/bin/TianoCompress
-          TianoCompress --version || true
-          REF=8542980d02b4d2cc5c32ee3542de1760b2562aac
-          mkdir -p unixnu
-          curl -sL "https://raw.githubusercontent.com/UniXNU/UniXNU/$REF/scripts/unixnu/ramdisk.py" -o ramdisk.py
-          curl -sL "https://raw.githubusercontent.com/UniXNU/UniXNU/$REF/scripts/unixnu/vendor_boot.py" -o unixnu/vendor_boot.py
-          curl -sL "https://raw.githubusercontent.com/UniXNU/UniXNU/$REF/scripts/unixnu/util.py" -o unixnu/util.py
-          touch unixnu/__init__.py
+          TAG="7.3.4%202026-11-13"
+          curl -sL --retry 3 -o boot.img "https://github.com/ianchb/sm8550-mainline/releases/download/$TAG/boot_sheng_singleboot.img"
+          ls -la boot.img
+          for u in \
+            "https://busybox.net/downloads/binaries/1.36.1-aarch64-linux-musl/busybox" \
+            "https://busybox.net/downloads/binaries/1.35.0-aarch64-linux-musl/busybox"; do
+            curl -sfL --retry 2 -o busybox "$u" && break
+          done
+          chmod +x busybox
+          curl -sL --retry 3 -o linux.deb "https://github.com/ianchb/sm8550-mainline/releases/download/$TAG/linux-xiaomi-sheng.deb"
+          ls -la linux.deb
 
-      - name: Download v9 vendor_boot from release
+      - name: Extract tools from deb
         run: |
           set -euxo pipefail
-          curl -sL --retry 5 --retry-all-errors -o stock-vendor_boot.img "https://github.com/ppma/UniXNU-sheng-fork/releases/download/gki-v9-build/vendor_boot.img"
-          ls -la stock-vendor_boot.img
+          dpkg-deb -x linux.deb rootfs
+          find rootfs -name 'rebootbl' | head -5
+          find rootfs -name 'nvmem-reboot-mode.ko' | head -5
 
-      - name: Write patch scripts
-        run: |
-          cat > patch_vb.py <<'PYEOF'
-          import os, sys, subprocess
-          sys.path.insert(0, '.')
-          import ramdisk
-          from unixnu import vendor_boot
-
-          stock = open('stock-vendor_boot.img', 'rb').read()
-          parts = vendor_boot.parse(stock)
-          open('ramdisk.bin', 'wb').write(parts['ramdisk'])
-          print('vendor ramdisk bytes:', len(parts['ramdisk']))
-
-          ramdisk.decode('ramdisk.bin', 'fat.img')
-          print('FAT bytes:', os.path.getsize('fat.img'))
-          assert os.path.getsize('fat.img') == 256 * 1024 * 1024
-
-          def run(cmd, required=True):
-              r = subprocess.run(cmd, capture_output=True, text=True)
-              print('$', ' '.join(cmd), 'rc=', r.returncode)
-              if r.stdout:
-                  print(r.stdout[:2000])
-              if r.stderr:
-                  print('ERR:', r.stderr[:300])
-              if required and r.returncode != 0:
-                  sys.exit(1)
-              return r
-
-          run(['mdir', '-i', 'fat.img', '::/'], required=False)
-          run(['mdir', '-i', 'fat.img', '::/EFI/UniXNU'], required=False)
-          toml_path = None
-          for cand in ['::/EFI/UniXNU/unixnu.toml', '::/EFI/UniXNU/Payloads/unixnu.toml',
-                       '::/EFI/UNIXNU/unixnu.toml', '::/EFI/unixnu.toml', '::/unixnu.toml']:
-              rr = subprocess.run(['mtype', '-i', 'fat.img', cand], capture_output=True)
-              if rr.returncode == 0:
-                  toml_path = cand
-                  print('found toml at', cand)
-                  break
-          if not toml_path:
-              print('::error::unixnu.toml not located')
-              sys.exit(1)
-          run(['mcopy', '-i', 'fat.img', toml_path, 'u.toml'])
-          text = open('u.toml', 'rb').read()
-          print('toml bytes:', len(text))
-          print(text.decode('utf-8', 'replace')[:800])
-          if b'ethernet=1' not in text:
-              print('::error::ethernet=1 not found in unixnu.toml')
-              sys.exit(1)
-          count = text.count(b'ethernet=1')
-          text = text.replace(b'"autoreset=7200"', b'""')
-          text = text.replace(b'autoreset=7200', b'')
-          open('u.toml', 'wb').write(text)
-          print('replaced occurrences:', count)
-          subprocess.run(['mcopy', '-i', 'fat.img', '-o', 'u.toml', toml_path], check=True)
-
-          ramdisk.encode('fat.img', 'new-ramdisk.bin')
-          vendor_boot.build('stock-vendor_boot.img', 'new-ramdisk.bin', 'vendor_boot-daily.img', 0x1000000)
-          print('patched size:', os.path.getsize('vendor_boot-daily.img'))
-          assert os.path.getsize('vendor_boot-daily.img') <= 0x6000000
-          print('PATCH DONE')
-          PYEOF
-          cat > verify_vb.py <<'PYEOF'
-          import struct
-          v = open('vendor_boot-daily.img', 'rb').read()
-          assert v[:8] == b'VNDRBOOT'
-          hver, page = struct.unpack_from('<II', v, 8)
-          raddr = struct.unpack_from('<I', v, 20)[0]
-          vrs = struct.unpack_from('<I', v, 24)[0]
-          print('header_version=%d page=%d vendor_ramdisk_size=%d ramdisk_addr=0x%x' % (hver, page, vrs, raddr))
-          assert hver == 4 and page == 4096 and vrs > 0 and raddr == 0x1000000
-          assert len(v) <= 0x6000000
-          print('VERIFY OK')
-          PYEOF
-
-      - name: Decode patch encode rebuild
+      - name: Build log reader image
         run: |
           set -euxo pipefail
-          python3 patch_vb.py
-          ls -la vendor_boot-daily.img new-ramdisk.bin
+          python3 package/linux-log/build-linux-log-boot.py \
+            --boot boot.img \
+            --busybox busybox \
+            --rebootbl "$(find rootfs -name rebootbl -type f | head -1)" \
+            --module "$(find rootfs -name nvmem-reboot-mode.ko -type f | head -1)" \
+            --out sheng-linux-log.img
+          ls -la sheng-linux-log.img
 
-      - name: Verify patched image headers
-        run: |
-          python3 verify_vb.py
-
-      - name: Publish patched vendor_boot to release
+      - name: Publish to release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euxo pipefail
-          gh release view gki-v9-daily --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 && gh release delete gki-v9-daily --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" || true
-          gh release create gki-v9-daily vendor_boot-daily.img --repo "$GITHUB_REPOSITORY" --title "vendor_boot with daily driver: no data-reset, no autoreset (patched v9)" --notes "v9 vendor_boot.img with default-boot kernel arg ethernet=1 replaced by daily driver: no data-reset, no autoreset (same length). Flash: fastboot flash vendor_boot_a vendor_boot-daily.img"
-          gh release view gki-v9-daily --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | .name + " -> " + .url'
+          gh release view gki-tools --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 && gh release delete gki-tools --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" || true
+          gh release create gki-tools sheng-linux-log.img --repo "$GITHUB_REPOSITORY" --title "diagnostic tools" --notes "sheng-linux-log.img: flash to boot_a, boots a tiny Linux that enumerates a USB CDC ACM serial and serves the UniXNU log window (last 32MiB of userdata). Flash back the normal boot image afterwards."
