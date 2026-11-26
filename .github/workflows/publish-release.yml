@@ -9,44 +9,30 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Download latest build cache and locate BootResetCore.h
+      - name: Download artifact via API (GitHub-internal transfer)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euxo pipefail
-          curl -sL --retry 5 --retry-all-errors \
+          ART=15079403875
+          curl -sL --retry 6 --retry-all-errors \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/caches/11112188546/zip" \
-            -o cache.zip
-          ls -la cache.zip
-          mkdir -p unpacked
-          cd unpacked
-          unzip -q ../cache.zip || true
-          echo "=== BootResetCore locations ==="
-          find . -iname '*bootreset*' -o -iname '*BootReset*' | head -20
-          echo "=== all BootResetCore.h contents ==="
-          for f in $(find . -iname 'BootResetCore.h'); do
-            echo "----- $f -----"
-            cat "$f"
-          done
-          echo "=== ShengBootGuard include dir listing ==="
-          find . -path '*shengPkg/Include*' -type f | head -20
-          echo "=== Binaries dirs ==="
-          find . -maxdepth 4 -type d -name 'Binaries' | head -5
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/artifacts/$ART/zip" \
+            -o sheng-boot-only.zip
+          ls -la sheng-boot-only.zip
+          unzip -q -o sheng-boot-only.zip
+          find . -maxdepth 2 -type f -printf '%s  %p\n' | sort -nr | head -15
 
-      - name: Publish BootResetCore.h to release
+      - name: Publish v15 boot.img to release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euxo pipefail
-          cd unpacked
-          F=$(find . -iname 'BootResetCore.h' | head -1)
-          if [ -n "$F" ]; then
-            gh release view gki-tools --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 && gh release delete gki-tools --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" || true
-            gh release create gki-tools "$F" --repo "$GITHUB_REPOSITORY" --title "firmware headers" --notes "BootResetCore.h extracted from the build cache"
-            gh release view gki-tools --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | .name'
-          else
-            echo "::error::BootResetCore.h not found in cache"
-            exit 1
-          fi
+          gh release view gki-v15 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 && gh release delete gki-v15 --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" || true
+          BOOT=$(find . -maxdepth 2 -type f -name 'boot.img' ! -path './sheng-boot-only*' | head -1)
+          VB=$(find . -maxdepth 2 -type f -name 'vendor_boot.img' ! -path './sheng-boot-only*' | head -1)
+          gh release create gki-v15 "$BOOT" "$VB" --repo "$GITHUB_REPOSITORY" \
+            --title "v15: ResetSystemLib fix (macOS restart goes to system)" \
+            --notes "run 45730799220. boot.img maps every reset to plain PSCI SYSTEM_RESET (stock warm path used SYSTEM_RESET2 which Qualcomm XBL maps to fastboot). vendor_boot unchanged from v11. Flash: fastboot flash boot_a boot.img"
+          gh release view gki-v15 --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | .name + " (" + (.size|tostring) + ")"'
