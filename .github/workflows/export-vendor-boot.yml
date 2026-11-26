@@ -1,0 +1,25 @@
+name: export-vendor-boot-pw
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download vendor_boot-pw.img from release
+        run: |
+          curl -sL -o vendor_boot-pw.img \
+            https://github.com/ppma/UniXNU-sheng-fork/releases/download/gki-v15-pw/vendor_boot-pw.img
+          sha256sum vendor_boot-pw.img
+          ls -l vendor_boot-pw.img
+      - name: Upload as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vendor-boot-pw
+          path: vendor_boot-pw.img
+          retention-days: 3
