@@ -1,0 +1,36 @@
+name: publish-v17
+
+on:
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifact via API (GitHub-internal transfer)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euxo pipefail
+          ART=15138296418
+          curl -sL --retry 6 --retry-all-errors \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/artifacts/$ART/zip" \
+            -o sheng-boot-only.zip
+          ls -la sheng-boot-only.zip
+          unzip -q -o sheng-boot-only.zip
+          find . -maxdepth 2 -type f -printf '%s  %p\n' | sort -nr | head -15
+      - name: Publish v17 boot.img to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euxo pipefail
+          gh release view gki-v17 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 && gh release delete gki-v17 --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" || true
+          BOOT=$(find . -maxdepth 2 -type f -name 'boot.img' ! -path './sheng-boot-only*' | head -1)
+          gh release create gki-v17 "$BOOT" --repo "$GITHUB_REPOSITORY" \
+            --title "v17: dual ResetSystemLib+HwResetSystemLib override (macOS restart fix)" \
+            --notes "run 45840276543. boot.img overrides both ResetSystemLib and HwResetSystemLib to plain PSCI SYSTEM_RESET. Flash: fastboot flash boot_a boot.img"
+          gh release view gki-v17 --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | .name + " (" + (.size|tostring) + ")"'
