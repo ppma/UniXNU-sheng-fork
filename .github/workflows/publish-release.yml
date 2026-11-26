@@ -4,35 +4,164 @@ on:
   workflow_dispatch:
 
 jobs:
-  publish:
+  patch:
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Download artifact via API (GitHub-internal transfer)
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Build TianoCompress and fetch scripts
         run: |
           set -euxo pipefail
-          ART=15079403875
-          curl -sL --retry 6 --retry-all-errors \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/artifacts/$ART/zip" \
-            -o sheng-boot-only.zip
-          ls -la sheng-boot-only.zip
-          unzip -q -o sheng-boot-only.zip
-          find . -maxdepth 2 -type f -printf '%s  %p\n' | sort -nr | head -15
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq mtools
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/microsoft/mu_basecore.git mubt
+          git -C mubt sparse-checkout set BaseTools/Source/C BaseTools/Source/Python MdePkg/Include
+          make -C mubt/BaseTools/Source/C TianoCompress 2>/dev/null || make -C mubt/BaseTools/Source/C || true
+          TC=$(find mubt -name TianoCompress -type f | head -1)
+          if [ -z "$TC" ]; then echo "::error::TianoCompress build failed"; exit 1; fi
+          sudo ln -sf "$(pwd)/$TC" /usr/local/bin/TianoCompress
+          TianoCompress --version || true
+          REF=8542980d02b4d2cc5c32ee3542de1760b2562aac
+          mkdir -p unixnu
+          curl -sL "https://raw.githubusercontent.com/UniXNU/UniXNU/$REF/scripts/unixnu/ramdisk.py" -o ramdisk.py
+          curl -sL "https://raw.githubusercontent.com/UniXNU/UniXNU/$REF/scripts/unixnu/vendor_boot.py" -o unixnu/vendor_boot.py
+          curl -sL "https://raw.githubusercontent.com/UniXNU/UniXNU/$REF/scripts/unixnu/util.py" -o unixnu/util.py
+          touch unixnu/__init__.py
 
-      - name: Publish v15 boot.img to release
+      - name: Download v15 vendor_boot from release
+        run: |
+          set -euxo pipefail
+          curl -sL --retry 5 --retry-all-errors -o stock-vendor_boot.img "https://github.com/ppma/UniXNU-sheng-fork/releases/download/gki-v15/vendor_boot.img"
+          ls -la stock-vendor_boot.img
+
+      - name: Patch payload with password-reset addon
+        run: |
+          set -euxo pipefail
+          python3 - <<'PYEOF'
+          import os, sys, zlib, struct, subprocess
+          sys.path.insert(0, '.')
+          import ramdisk
+          from unixnu import vendor_boot
+
+          def pad(b): return b + bytes(-len(b) % 8)
+
+          def read_addon(path):
+              data = open(path, 'rb').read()
+              assert data[:8] == b'NGPUADD2', 'not an addon'
+              count = struct.unpack_from('<I', data, 8)[0]
+              at, files = 24, []
+              for _ in range(count):
+                  plen, mode, size, packed = struct.unpack_from('<IIQQ', data, at)
+                  at += 24
+                  name = data[at:at+plen-1].decode()
+                  at += (plen + 7) & ~7
+                  body = zlib.decompress(data[at:at+packed])
+                  assert len(body) == size
+                  at += (packed + 7) & ~7
+                  files.append((name, mode, body))
+              return files
+
+          def write_addon(path, files):
+              out = b''
+              for name, mode, body in files:
+                  raw = name.encode() + b'\0'
+                  assert len(raw) <= 160
+                  packed = zlib.compress(body, 9)
+                  out += struct.pack('<IIQQ', len(raw), mode, len(body), len(packed)) + pad(raw) + pad(packed)
+              blob = b'NGPUADD2' + struct.pack('<IIQ', len(files), 0, 24 + len(out)) + out
+              open(path, 'wb').write(blob)
+
+          # --- build the payload files ---
+          plist = b'''<?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>Label</key><string>org.unixnu.resetpw</string>
+            <key>ProgramArguments</key>
+            <array>
+              <string>/bin/sh</string>
+              <string>/Library/Application Support/UniXNU/resetpw.sh</string>
+            </array>
+            <key>RunAtLoad</key><true/>
+            <key>StandardOutPath</key><string>/private/var/log/unixnu-resetpw.log</string>
+            <key>StandardErrorPath</key><string>/private/var/log/unixnu-resetpw.log</string>
+          </dict>
+          </plist>
+          '''
+          script = b'''#!/bin/sh
+          set -eu
+          [ -f /private/var/db/.unixnu-pwset ] && exit 0
+          PW='unixnu123'
+          /usr/bin/dscl . -passwd /Users/unixnu "$PW"
+          /usr/bin/defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser -string unixnu
+          /usr/bin/defaults write /Library/Preferences/com.apple.loginwindow autoLoginUserScreenLocked -bool false
+          if [ -f '/Library/Application Support/UniXNU/kcpassword' ]; then
+            /usr/bin/install -o root -g wheel -m 600 '/Library/Application Support/UniXNU/kcpassword' /private/etc/kcpassword
+          fi
+          /usr/bin/logger -t UniXNUResetPw "password reset done"
+          touch /private/var/db/.unixnu-pwset
+          exit 0
+          '''
+          # kcpassword: XOR(password + NUL, pad to 12) with Apple's obfuscation key
+          key = bytes.fromhex('7d895223d2bcddeaa3b91f')
+          pw = b'unixnu123\0'
+          pw += bytes(-len(pw) % 12)
+          kcpw = bytes(v ^ key[i % len(key)] for i, v in enumerate(pw))
+
+          newfiles = [
+              ('Library/LaunchDaemons/org.unixnu.resetpw.plist', 0o644, plist),
+              ('Library/Application Support/UniXNU/resetpw.sh', 0o755, script),
+              ('Library/Application Support/UniXNU/kcpassword', 0o600, kcpw),
+          ]
+
+          # --- decode vendor_boot -> FAT ---
+          stock = open('stock-vendor_boot.img', 'rb').read()
+          parts = vendor_boot.parse(stock)
+          open('ramdisk.bin', 'wb').write(parts['ramdisk'])
+          print('vendor ramdisk bytes:', len(parts['ramdisk']))
+          ramdisk.decode('ramdisk.bin', 'fat.img')
+          print('FAT bytes:', os.path.getsize('fat.img'))
+
+          # --- merge addon (keep the GPU plugin if present) ---
+          r = subprocess.run(['mcopy', '-i', 'fat.img', '::/kernel.macho.gpuaddon', 'gpu.addon'], capture_output=True)
+          files = read_addon('gpu.addon') if r.returncode == 0 else []
+          print('existing addon files:', len(files))
+          for n, m, b in newfiles:
+              files = [f for f in files if f[0] != n] + [(n, m, b)]
+          write_addon('gpu.addon', files)
+          print('merged addon files:', len(files))
+          subprocess.run(['mcopy', '-i', 'fat.img', '-o', 'gpu.addon', '::/kernel.macho.gpuaddon'], check=True)
+
+          # --- re-encode and rebuild vendor_boot ---
+          ramdisk.encode('fat.img', 'new-ramdisk.bin')
+          vendor_boot.build('stock-vendor_boot.img', 'new-ramdisk.bin', 'vendor_boot-pw.img', 0x1000000)
+          print('patched size:', os.path.getsize('vendor_boot-pw.img'))
+          assert os.path.getsize('vendor_boot-pw.img') <= 0x6000000
+          print('PATCH DONE')
+          PYEOF
+
+      - name: Verify patched image headers
+        run: |
+          set -euxo pipefail
+          python3 - <<'PYEOF'
+          import struct
+          v = open('vendor_boot-pw.img', 'rb').read()
+          assert v[:8] == b'VNDRBOOT'
+          hver, page = struct.unpack_from('<II', v, 8)
+          raddr = struct.unpack_from('<I', v, 20)[0]
+          vrs = struct.unpack_from('<I', v, 24)[0]
+          print('header_version=%d page=%d vendor_ramdisk_size=%d ramdisk_addr=0x%x' % (hver, page, vrs, raddr))
+          assert hver == 4 and page == 4096 and vrs > 0 and raddr == 0x1000000
+          assert len(v) <= 0x6000000
+          print('VERIFY OK')
+          PYEOF
+          ls -la vendor_boot-pw.img
+
+      - name: Publish patched vendor_boot to release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euxo pipefail
-          gh release view gki-v15 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 && gh release delete gki-v15 --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" || true
-          BOOT=$(find . -maxdepth 2 -type f -name 'boot.img' ! -path './sheng-boot-only*' | head -1)
-          VB=$(find . -maxdepth 2 -type f -name 'vendor_boot.img' ! -path './sheng-boot-only*' | head -1)
-          gh release create gki-v15 "$BOOT" "$VB" --repo "$GITHUB_REPOSITORY" \
-            --title "v15: ResetSystemLib fix (macOS restart goes to system)" \
-            --notes "run 45730799220. boot.img maps every reset to plain PSCI SYSTEM_RESET (stock warm path used SYSTEM_RESET2 which Qualcomm XBL maps to fastboot). vendor_boot unchanged from v11. Flash: fastboot flash boot_a boot.img"
-          gh release view gki-v15 --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | .name + " (" + (.size|tostring) + ")"'
+          gh release view gki-v15-pw --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 && gh release delete gki-v15-pw --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" || true
+          gh release create gki-v15-pw vendor_boot-pw.img --repo "$GITHUB_REPOSITORY" --title "vendor_boot with unixnu password reset addon" --notes "Resets the unixnu password to unixnu123 and restores auto-login on first boot. Flash: fastboot flash vendor_boot_a vendor_boot-pw.img"
+          gh release view gki-v15-pw --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | .name + " -> " + .url'
