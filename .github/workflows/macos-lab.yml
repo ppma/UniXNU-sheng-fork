@@ -240,6 +240,81 @@ jobs:
           else:
               print('Mesa patch sequence unchanged -> cached workspace kept')
           PYTHON
+      - name: Pre-seed external source checkouts (network-resilient)
+        # build_plugin() calls checkout() twice, each doing a SINGLE un-retried
+        # `git fetch <url> <pin>`: metal2vulkan (github.com) and mesa-work
+        # (chromium.googlesource.com). Run 46113298804 died on a transient
+        # "Could not resolve host: github.com" in the first one. Pre-fetch both
+        # here with retries and apply every recorded Mesa patch, so checkout()
+        # sees a matching HEAD + patched tree and never touches the network
+        # during Build images.
+        run: |
+          set -euxo pipefail
+          python3 - <<'PYTHON'
+          import json, shutil, subprocess, time
+          from pathlib import Path
+          core = Path('UniXNU')
+          tree = core / 'out/sheng/macos-27.3-26C5035r/sheng_macos/tree'
+          cache = tree / '.cache'
+
+          def run(*args, timeout=600):
+              return subprocess.run([str(a) for a in args], check=True,
+                                   capture_output=True, text=True, timeout=timeout)
+
+          def head(path):
+              try:
+                  return subprocess.check_output(
+                      ['git', '-C', str(path), 'rev-parse', 'HEAD'],
+                      text=True, stderr=subprocess.DEVNULL).strip()
+              except subprocess.CalledProcessError:
+                  return ''
+
+          def clone_with_retry(path, pin, label):
+              url = pin.get('mirror', pin['repository'])
+              commit = pin['commit']
+              if head(path) == commit:
+                  print('%s already at %s' % (label, commit[:12]))
+                  return False
+              for attempt in range(6):
+                  try:
+                      if path.exists():
+                          shutil.rmtree(path)
+                      path.mkdir(parents=True)
+                      run('git', 'init', '-q', str(path))
+                      run('git', '-C', str(path), 'fetch', '--depth=1', url, commit)
+                      run('git', '-C', str(path), 'checkout', '--detach', 'FETCH_HEAD')
+                      assert head(path) == commit, 'HEAD mismatch after checkout'
+                      print('%s pinned at %s (attempt %d)' %
+                            (label, commit[:12], attempt + 1))
+                      return True
+                  except (subprocess.CalledProcessError,
+                          subprocess.TimeoutExpired, AssertionError) as e:
+                      print('%s attempt %d failed: %s' % (label, attempt + 1, e))
+                      time.sleep(15)
+              raise SystemExit('%s: pre-clone failed after 6 attempts' % label)
+
+          # 1) translator (metal2vulkan) - build_plugin checks this out first
+          t = json.loads(
+              (core / 'scripts/data/gpu-metal-vulkan-inputs.json').read_text())['translator']
+          clone_with_retry(cache / 'gpu-reference/metal2vulkan', t, 'translator')
+
+          # 2) Mesa - rebuild the workspace dropped by the sequence guard with
+          #    ALL recorded patches (24 -> 26 in upstream core fdf81eaa)
+          a = json.loads(
+              (core / 'scripts/data/adreno-compiler-inputs.json').read_text())
+          mesa = cache / 'mesa-work'
+          fresh = clone_with_retry(mesa, a['mesa'], 'mesa')
+          if fresh:
+              for patch in a['patches']:
+                  assert (core / patch).is_file(), 'missing patch: ' + patch
+                  run('git', '-C', str(mesa), 'apply', str(core / patch))
+              print('applied %d Mesa patches' % len(a['patches']))
+          changed = subprocess.check_output(
+              ['git', '-C', str(mesa), 'diff', 'HEAD', '--name-only'],
+              text=True).splitlines()
+          print('Mesa working tree has %d modified tracked files' % len(changed))
+          assert changed, 'Mesa patches are not applied to the workspace'
+          PYTHON
       - name: Install build tools
         timeout-minutes: 45
         run: |
