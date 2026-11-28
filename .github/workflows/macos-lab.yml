@@ -204,6 +204,42 @@ jobs:
           stamp.parent.mkdir(parents=True, exist_ok=True)
           stamp.write_text(signature + '\n')
           PYTHON
+      - name: Refresh Mesa patch sequence
+        # Upstream core fdf81eaa keeps the Mesa pin at 85fda3b3 but grows
+        # adreno-compiler-inputs.json from 24 to 26 patches (adds
+        # turnip-darwin-runtime-capabilities.patch and
+        # turnip-darwin-timeline-wait-many.patch). A restored build-inputs
+        # cache carries the OLD 24-patch mesa-work tree; checkout() sees the
+        # directory exists and returns fresh=False, then the reversed
+        # 26-patch identity check fails with "Recorded Mesa patch sequence
+        # differs". Drop the workspace whenever the recorded sequence changes
+        # so build-boot-runtime.py re-clones and applies every patch.
+        # Same stamp pattern as the translator step: invalidate only on change.
+        run: |
+          set -euxo pipefail
+          python3 - <<'PYTHON'
+          import hashlib, json, shutil
+          from pathlib import Path
+          core = Path('UniXNU')
+          tree = core / 'out/sheng/macos-27.3-26C5035r/sheng_macos/tree'
+          pins = json.loads((core / 'scripts/data/adreno-compiler-inputs.json').read_text())
+          signature = hashlib.sha256(
+              ('\n'.join(pins['patches']) + '\n').encode() +
+              b''.join((core / p).read_bytes() for p in pins['patches'])
+          ).hexdigest()
+          stamp = tree / '.cache/gpu-reference/unixnu-mesa-patch-sequence.sha256'
+          source = tree / '.cache/mesa-work'
+          old = stamp.read_text().strip() if stamp.exists() else ''
+          if old != signature:
+              if source.exists():
+                  shutil.rmtree(source)
+              stamp.parent.mkdir(parents=True, exist_ok=True)
+              stamp.write_text(signature + '\n')
+              print('Mesa patch sequence changed -> dropped stale workspace; '
+                    'fresh checkout + all %d patches' % len(pins['patches']))
+          else:
+              print('Mesa patch sequence unchanged -> cached workspace kept')
+          PYTHON
       - name: Install build tools
         timeout-minutes: 45
         run: |
