@@ -258,8 +258,15 @@ jobs:
           cache = tree / '.cache'
 
           def run(*args, timeout=600):
-              return subprocess.run([str(a) for a in args], check=True,
-                                   capture_output=True, text=True, timeout=timeout)
+              result = subprocess.run([str(a) for a in args], check=False,
+                                     capture_output=True, text=True, timeout=timeout)
+              if result.returncode:
+                  print('FAILED:', ' '.join(str(a) for a in args))
+                  print((result.stderr or '')[-2000:])
+                  raise subprocess.CalledProcessError(
+                      result.returncode, [str(a) for a in args],
+                      result.stdout, result.stderr)
+              return result
 
           def head(path):
               try:
@@ -306,8 +313,11 @@ jobs:
           fresh = clone_with_retry(mesa, a['mesa'], 'mesa')
           if fresh:
               for patch in a['patches']:
-                  assert (core / patch).is_file(), 'missing patch: ' + patch
-                  run('git', '-C', str(mesa), 'apply', str(core / patch))
+                  # git -C <repo> resolves a relative patch path INSIDE <repo>;
+                  # use an absolute path (v20 failed with exit 128 here).
+                  absolute = (core / patch).resolve()
+                  assert absolute.is_file(), 'missing patch: ' + patch
+                  run('git', '-C', str(mesa), 'apply', str(absolute))
               print('applied %d Mesa patches' % len(a['patches']))
           changed = subprocess.check_output(
               ['git', '-C', str(mesa), 'diff', 'HEAD', '--name-only'],
