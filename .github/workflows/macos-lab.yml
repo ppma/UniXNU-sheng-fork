@@ -6,7 +6,7 @@ on:
       core_ref:
         description: UniXNU core branch or commit
         type: string
-        default: 8542980d02b4d2cc5c32ee3542de1760b2562aac
+        default: fdf81eaa832ce5c850d3c53c698407aa722a4653
       root_storage:
         description: Build the userdata root image
         type: boolean
@@ -78,11 +78,11 @@ jobs:
           ref: ${{ inputs.core_ref }}
           path: UniXNU
           submodules: recursive
-      - name: Apply PR 318 (AppleCredentialManager in prelink)
-        # Upstream open PR UniXNU/UniXNU#318: without AppleCredentialManager the
-        # macOS GUI authorization path (coreauthd/coreautha) fails ACMContextCreate
-        # with -5 and every password prompt shakes and rejects valid input.
-        # acm_fastsim=1 (board side) selects Apple's software command dispatcher.
+      - name: Reconcile profile/component ABI (idempotent, upstream PR 318)
+        # core > 8542980d merged UniXNU/UniXNU#318: profile.toml already lists
+        # AppleCredentialManager and excludes AppleSEPManager/IOSlaveProcessor.
+        # The legacy text-replace asserts would abort on the latest core, so make
+        # every edit conditional and verify the merged state instead.
         run: |
           set -euxo pipefail
           python3 - <<'PY'
@@ -91,20 +91,29 @@ jobs:
           s = p.read_text()
           old1 = '"com.apple.driver.AppleAudioClockLibs", "com.apple.driver.AppleEffaceableStorage"'
           new1 = '"com.apple.driver.AppleAudioClockLibs", "com.apple.driver.AppleCredentialManager", "com.apple.driver.AppleEffaceableStorage"'
-          assert old1 in s, 'roots anchor 1 missing'
-          s = s.replace(old1, new1)
+          if old1 in s:
+              s = s.replace(old1, new1)
+              print('added AppleCredentialManager (legacy core)')
+          else:
+              assert '"com.apple.driver.AppleCredentialManager"' in s, 'ACM missing and legacy anchor gone'
+              print('AppleCredentialManager already present (upstream PR 318 merged)')
           old2 = '"!com.apple.driver.AppleOnboardSerial", "!com.apple.driver.AppleSMC"]'
           new2 = '"!com.apple.driver.AppleOnboardSerial", "!com.apple.driver.AppleSMC", "!com.apple.driver.AppleSEPManager", "!com.apple.driver.IOSlaveProcessor"]'
-          assert old2 in s, 'roots anchor 2 missing'
-          s = s.replace(old2, new2)
+          if old2 in s:
+              s = s.replace(old2, new2)
+              print('added SEP/IOSlave exclusions (legacy core)')
+          else:
+              assert '!com.apple.driver.AppleSEPManager' in s, 'SEP exclusion missing'
+              print('SEP/IOSlave exclusions already present (upstream PR 318 merged)')
           p.write_text(s, newline='\n')
           c = Path('UniXNU/components.toml')
           t = c.read_text()
           old3 = 'os_abi = ["ipados-17.7.11-21H461", "ipados-27.0.1-24A446"]'
           new3 = 'os_abi = ["ipados-17.7.11-21H461", "ipados-27.0.1-24A446", "macos-27.3-26C5035r"]'
-          assert old3 in t, 'os_abi anchor missing'
-          c.write_text(t.replace(old3, new3), newline='\n')
-          print('PR 318 patches applied')
+          n = t.count(old3)
+          if n:
+              c.write_text(t.replace(old3, new3), newline='\n')
+          print('components.toml: added macOS ABI to %d component(s) (idempotent)' % n)
           PY
       - name: Check out firmware sources
         uses: actions/checkout@v4
@@ -130,6 +139,33 @@ jobs:
                     echo 'IyMgQGZpbGUKIyAgc2hlbmcgUmVzZXRTeXN0ZW1MaWI6IGFsbCByZXNldHMgZ28gdGhyb3VnaCBwbGFpbiBQU0NJIFNZU1RFTV9SRVNFVC4KIyAgQWxzbyBzZXJ2ZXMgYXMgSHdSZXNldFN5c3RlbUxpYiAodGhlIHJ1bnRpbWUgcmVzZXQgcGF0aCB1c2VzIHRoYXQgY2xhc3MpLgojCiMgIFNQRFgtTGljZW5zZS1JZGVudGlmaWVyOiBNSVQKIyMKCltEZWZpbmVzXQogIElORl9WRVJTSU9OICAgID0gMHgwMDAxMDAxQgogIEJBU0VfTkFNRSAgICAgID0gU2hlbmdSZXNldFN5c3RlbUxpYgogIEZJTEVfR1VJRCAgICAgID0gNUUxRTFFOUEtNkYwRS00QzdCLTlBMkItMUUzRDRDNUI2QTdGCiAgTU9EVUxFX1RZUEUgICAgPSBCQVNFCiAgVkVSU0lPTl9TVFJJTkcgPSAxLjAKICBMSUJSQVJZX0NMQVNTICA9IFJlc2V0U3lzdGVtTGliCiAgTElCUkFSWV9DTEFTUyAgPSBId1Jlc2V0U3lzdGVtTGliCgpbU291cmNlc10KICBTaGVuZ1Jlc2V0U3lzdGVtTGliLmMKCltQYWNrYWdlc10KICBBcm1Qa2cvQXJtUGtnLmRlYwogIE1kZVBrZy9NZGVQa2cuZGVjCiAgTWRlTW9kdWxlUGtnL01kZU1vZHVsZVBrZy5kZWMKCltMaWJyYXJ5Q2xhc3Nlc10KICBBcm1Nb25pdG9yTGliCg==' | base64 -d > Platforms/Xiaomi/shengPkg/Library/ShengResetSystemLib/ShengResetSystemLib.inf
                     echo 'ZnJvbSBwYXRobGliIGltcG9ydCBQYXRoCnAgPSBQYXRoKCdQbGF0Zm9ybXMvWGlhb21pL3NoZW5nUGtnL3NoZW5nLmRzYycpCnMgPSBwLnJlYWRfdGV4dCgpCmFuY2hvciA9ICdNZW1vcnlNYXBMaWJ8c2hlbmdQa2cvTGlicmFyeS9NZW1vcnlNYXBMaWIvTWVtb3J5TWFwTGliLmluZlxuJwphc3NlcnQgYW5jaG9yIGluIHMsICdNZW1vcnlNYXBMaWIgbGluZSBtaXNzaW5nJwphZGQgPSAoJyAgSHdSZXNldFN5c3RlbUxpYnxzaGVuZ1BrZy9MaWJyYXJ5L1NoZW5nUmVzZXRTeXN0ZW1MaWIvU2hlbmdSZXNldFN5c3RlbUxpYi5pbmZcbicKICAgICAgICcgIFJlc2V0U3lzdGVtTGlifHNoZW5nUGtnL0xpYnJhcnkvU2hlbmdSZXNldFN5c3RlbUxpYi9TaGVuZ1Jlc2V0U3lzdGVtTGliLmluZlxuJykKaWYgJ0h3UmVzZXRTeXN0ZW1MaWJ8c2hlbmdQa2cnIG5vdCBpbiBzOgogICAgcyA9IHMucmVwbGFjZShhbmNob3IsIGFuY2hvciArIGFkZCwgMSkKcC53cml0ZV90ZXh0KHMpCnByaW50KCdzaGVuZy5kc2MgcGF0Y2hlZDogU2hlbmdSZXNldFN5c3RlbUxpYiBvdmVycmlkZXMgSHdSZXNldFN5c3RlbUxpYiArIFJlc2V0U3lzdGVtTGliJykK' | base64 -d > /tmp/patch-reset.py
                     python3 /tmp/patch-reset.py
+      - name: Assert no 2-hour autoreset boot arg
+        # autoreset=7200 forces a reboot to fastboot 2h after boot. The 215 GiB
+        # Data volume init takes >2h on this device, so it looped forever. The
+        # user requires this arg to stay REMOVED in the upstream-latest build.
+        # Defensively strip any autoreset=<n> and re-validate the TOML.
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          p = Path('device/board.toml')
+          s = p.read_text()
+          before = s
+          s = re.sub(r'"autoreset=\d+"\s*,\s*', '', s)
+          s = re.sub(r',\s*"autoreset=\d+"', '', s)
+          s = re.sub(r'"autoreset=\d+"', '', s)
+          if s != before:
+              p.write_text(s, newline='\n')
+              try:
+                  import tomllib
+                  tomllib.loads(p.read_text())
+                  print('STRIPPED autoreset= and re-validated TOML')
+              except ImportError:
+                  print('STRIPPED autoreset= (tomllib unavailable, skipped re-validate)')
+          assert 'autoreset' not in p.read_text(), 'autoreset= boot arg still present'
+          print('OK: board.toml has NO autoreset= (no 2-hour reboot to fastboot)')
+          PY
       - uses: actions/setup-python@v5
         with:
           python-version: '3.14'
@@ -227,7 +263,7 @@ jobs:
           import hashlib, os, subprocess
           from pathlib import Path
           version = subprocess.check_output(['xcodebuild', '-version']) + subprocess.check_output(['xcrun', '--sdk', 'iphoneos', '--show-sdk-version'])
-          key = 'sheng-macos27-kernel-v1-' + hashlib.sha256(version).hexdigest()[:16]
+          key = 'sheng-macos27-kernel-v2-fdf81eaa-' + hashlib.sha256(version).hexdigest()[:16]
           with Path(os.environ['GITHUB_OUTPUT']).open('a') as output:
               output.write('key=' + key + '\n')
           PYTHON
